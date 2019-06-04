@@ -1,0 +1,9 @@
+This branch is for implementing a feature for autheticating segments if there is Supplemental Property in the MPD that tells the player to do so.
+
+This folder contains:
+1. Dash content along with  mpd (test_last_segment.mpd) containing 
+   <SupplementalProperty schemeIdUri="urn:mpeg:dash:sea:auth:2013" value="http://192.168.1.149:9090/auth?base=$base$" />
+
+2. Golang script that calculates the sha1 sum of all files in the folder and starts an authentication server that returns sha1 sum value of files when requested.
+
+

@@ -17,6 +17,7 @@ package com.google.android.exoplayer2.source.dash;
 
 import android.net.Uri;
 import android.os.SystemClock;
+import android.util.Log;
 import androidx.annotation.CheckResult;
 import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
@@ -42,6 +43,7 @@ import com.google.android.exoplayer2.source.chunk.SingleSampleMediaChunk;
 import com.google.android.exoplayer2.source.dash.PlayerEmsgHandler.PlayerTrackEmsgHandler;
 import com.google.android.exoplayer2.source.dash.manifest.AdaptationSet;
 import com.google.android.exoplayer2.source.dash.manifest.DashManifest;
+import com.google.android.exoplayer2.source.dash.manifest.Descriptor;
 import com.google.android.exoplayer2.source.dash.manifest.RangedUri;
 import com.google.android.exoplayer2.source.dash.manifest.Representation;
 import com.google.android.exoplayer2.trackselection.TrackSelection;
@@ -52,9 +54,15 @@ import com.google.android.exoplayer2.upstream.LoaderErrorThrower;
 import com.google.android.exoplayer2.upstream.TransferListener;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
+import com.google.common.base.Charsets;
+import com.google.common.hash.Hashing;
+import com.google.common.io.ByteStreams;
+import java.io.BufferedInputStream;
 import java.io.IOException;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A default {@link DashChunkSource} implementation.
@@ -384,8 +392,123 @@ public class DefaultDashChunkSource implements DashChunkSource {
             seekTimeUs);
   }
 
+
+  //Segment Authentication code start
+
+  private static final class SegmentAuthenticator implements Runnable {
+
+    private final String segmentUri;
+    private final String authBaseTemplate;
+
+    public SegmentAuthenticator(String segmentUri,String authBaseTemplate) {
+      this.segmentUri = segmentUri;
+      this.authBaseTemplate = authBaseTemplate;
+    }
+
+    @Override
+    public void run() {
+
+      try {
+        BufferedInputStream bufferedInputStream = new  BufferedInputStream(new URL(segmentUri).openStream());
+        String strFileContents = new String(ByteStreams.toByteArray(bufferedInputStream), Charsets.ISO_8859_1);
+        String hashDownloadedFile = Hashing.sha1().hashString( strFileContents, Charsets.ISO_8859_1 ).toString();
+        Log.d("SegmentAuthenticator","Segment uri: "+segmentUri+"    SHA1: "+hashDownloadedFile);
+
+        String [] arrOfStr = segmentUri.split("/");
+        String file_name = arrOfStr[arrOfStr.length-1];
+
+        String authURL = authBaseTemplate.replace("$base$",file_name);
+        Log.d("SegmentAuthenticator","Authentication server url + file name : "+authURL);
+
+        BufferedInputStream authInputStream = new  BufferedInputStream(new URL(authURL).openStream());
+        String hashOriginalFile = new String(ByteStreams.toByteArray(authInputStream), Charsets.ISO_8859_1);
+
+        Log.d("SegmentAuthenticator","Auth response: "+hashOriginalFile);
+        if(file_name.equalsIgnoreCase("Sintel-1280x720_dash1.m4s")) {
+          hashOriginalFile = "abcd";
+        }
+        //Compare hashOriginalFile with hashDownloadedFile
+        if(hashOriginalFile.equalsIgnoreCase(hashDownloadedFile) == true) {
+          Log.d("SegmentAuthenticator","SEGMENT AUTHENTICATED");
+        } else {
+          Log.d("SegmentAuthenticator","MAN IN THE MIDDLE ATTACK - SEGMENT: "+ file_name);
+        }
+
+      }catch (IOException e) {
+        e.printStackTrace();
+      }
+    }
+  }
+
+//Example:
+/*  <SupplementalProperty schemeIdUri="urn:mpeg:dash:sea:auth:2013">
+    <sea:ContentAuthenticity
+      authSchemeIdUri="urn:mpeg:dash:sea:hmac-sha1"
+      keyUrlTemplate="https://verify.example.com/key.cgi?keyId=ef0d2b93"
+      authUrlTemplate= "http://verify.example.com?base=$base$" />
+    </SupplementalProperty>
+
+Currently supporting the following in MPD:
+    <SupplementalProperty schemeIdUri="urn:mpeg:dash:sea:auth:2013"" value="http://verify.example.com?base=$base$ (url of authentication
+    server)" />
+*/
+
+  String authSchemePresent(){
+    String sampleMimeType = trackSelection.getFormat(periodIndex).sampleMimeType;
+    List<Descriptor> listDescriptors;
+
+    if (sampleMimeType.contains("video") || sampleMimeType.contains("audio")) {
+      int track_type = sampleMimeType.contains("video")? C.TRACK_TYPE_VIDEO : C.TRACK_TYPE_AUDIO;
+
+      if (!manifest.getPeriod(periodIndex).adaptationSets.get(manifest.getPeriod(periodIndex)
+          .getAdaptationSetIndex(track_type)).supplementalProperties.isEmpty()) {
+        listDescriptors = manifest.getPeriod(periodIndex).adaptationSets
+            .get(manifest.getPeriod(periodIndex).getAdaptationSetIndex(track_type))
+            .supplementalProperties;
+        for ( Descriptor descriptor: listDescriptors ) {
+          if (descriptor.schemeIdUri.equalsIgnoreCase
+              ("urn:mpeg:dash:sea:auth:2013")) {
+            Log.d("authSchemePresent","Auth scheme found");
+            return descriptor.value;
+          }
+        }
+      }
+    }
+    Log.d("authSchemePresent","Auth scheme not found");
+    return null;
+  }
+
+  void PrintChunkInfo(Chunk chunk) {
+    Log.d("ChunkInfo","ChunkLoadComplete");
+    Log.d("ChunkInfo","Chunk URI: "+chunk.dataSpec.uri.toString());
+    Log.d("ChunkInfo","Bytes Loaded: "+chunk.bytesLoaded());
+    Log.d("ChunkInfo","Last loaded URI: "+chunk.getUri());
+    Map<String, List<String>> resp = chunk.getResponseHeaders();
+    for(String s: resp.keySet()) {
+      Log.d("ChunkInfo","Key: "+s+" Value: "+resp.get(s));
+    }
+    Log.d("ChunkInfo","---------------------------------");
+
+  }
+
+  void chunkAuthentication(Chunk chunk){
+    //Check if the scheme is present or not:
+    String authSchemeServerUri = authSchemePresent();
+    if(authSchemeServerUri != null) {
+      Log.d("chunkAuthentication","AuthSchemeServer URI: "+authSchemeServerUri);
+      SegmentAuthenticator p1 = new SegmentAuthenticator(chunk.getUri().toString(),authSchemeServerUri);
+      Thread t1 = new Thread(p1);
+      t1.start();
+
+    }
+  }
+
+//Segment Authentication code end
+
   @Override
   public void onChunkLoadCompleted(Chunk chunk) {
+    chunkAuthentication(chunk);
+
     if (chunk instanceof InitializationChunk) {
       InitializationChunk initializationChunk = (InitializationChunk) chunk;
       int trackIndex = trackSelection.indexOf(initializationChunk.trackFormat);
