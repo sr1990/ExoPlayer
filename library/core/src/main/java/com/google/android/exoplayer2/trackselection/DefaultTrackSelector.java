@@ -1934,6 +1934,7 @@ public class DefaultTrackSelector extends MappingTrackSelector {
           getAdaptiveAudioTracks(
               selectedGroup,
               formatSupports[selectedGroupIndex],
+              params.maxAudioBitrate,
               params.allowAudioMixedMimeTypeAdaptiveness,
               params.allowAudioMixedSampleRateAdaptiveness);
       if (adaptiveTracks.length > 0) {
@@ -1951,6 +1952,7 @@ public class DefaultTrackSelector extends MappingTrackSelector {
   private static int[] getAdaptiveAudioTracks(
       TrackGroup group,
       int[] formatSupport,
+      int maxAudioBitrate,
       boolean allowMixedMimeTypeAdaptiveness,
       boolean allowMixedSampleRateAdaptiveness) {
     int selectedConfigurationTrackCount = 0;
@@ -1967,6 +1969,7 @@ public class DefaultTrackSelector extends MappingTrackSelector {
                 group,
                 formatSupport,
                 configuration,
+                maxAudioBitrate,
                 allowMixedMimeTypeAdaptiveness,
                 allowMixedSampleRateAdaptiveness);
         if (configurationCount > selectedConfigurationTrackCount) {
@@ -1977,13 +1980,16 @@ public class DefaultTrackSelector extends MappingTrackSelector {
     }
 
     if (selectedConfigurationTrackCount > 1) {
+      Assertions.checkNotNull(selectedConfiguration);
       int[] adaptiveIndices = new int[selectedConfigurationTrackCount];
       int index = 0;
       for (int i = 0; i < group.length; i++) {
+        Format format = group.getFormat(i);
         if (isSupportedAdaptiveAudioTrack(
-            group.getFormat(i),
+            format,
             formatSupport[i],
-            Assertions.checkNotNull(selectedConfiguration),
+            selectedConfiguration,
+            maxAudioBitrate,
             allowMixedMimeTypeAdaptiveness,
             allowMixedSampleRateAdaptiveness)) {
           adaptiveIndices[index++] = i;
@@ -1998,6 +2004,7 @@ public class DefaultTrackSelector extends MappingTrackSelector {
       TrackGroup group,
       int[] formatSupport,
       AudioConfigurationTuple configuration,
+      int maxAudioBitrate,
       boolean allowMixedMimeTypeAdaptiveness,
       boolean allowMixedSampleRateAdaptiveness) {
     int count = 0;
@@ -2006,6 +2013,7 @@ public class DefaultTrackSelector extends MappingTrackSelector {
           group.getFormat(i),
           formatSupport[i],
           configuration,
+          maxAudioBitrate,
           allowMixedMimeTypeAdaptiveness,
           allowMixedSampleRateAdaptiveness)) {
         count++;
@@ -2018,9 +2026,11 @@ public class DefaultTrackSelector extends MappingTrackSelector {
       Format format,
       int formatSupport,
       AudioConfigurationTuple configuration,
+      int maxAudioBitrate,
       boolean allowMixedMimeTypeAdaptiveness,
       boolean allowMixedSampleRateAdaptiveness) {
     return isSupported(formatSupport, false)
+        && (format.bitrate == Format.NO_VALUE || format.bitrate <= maxAudioBitrate)
         && (format.channelCount != Format.NO_VALUE
             && format.channelCount == configuration.channelCount)
         && (allowMixedMimeTypeAdaptiveness
@@ -2308,14 +2318,14 @@ public class DefaultTrackSelector extends MappingTrackSelector {
     if (TextUtils.equals(format.language, language)) {
       return 3;
     }
-    // Partial match where one language is a subset of the other (e.g. "zho-hans" and "zho-hans-hk")
+    // Partial match where one language is a subset of the other (e.g. "zh-hans" and "zh-hans-hk")
     if (format.language.startsWith(language) || language.startsWith(format.language)) {
       return 2;
     }
-    // Partial match where only the main language tag is the same (e.g. "fra-fr" and "fra-ca")
-    if (format.language.length() >= 3
-        && language.length() >= 3
-        && format.language.substring(0, 3).equals(language.substring(0, 3))) {
+    // Partial match where only the main language tag is the same (e.g. "fr-fr" and "fr-ca")
+    String formatMainLanguage = Util.splitAtFirst(format.language, "-")[0];
+    String queryMainLanguage = Util.splitAtFirst(language, "-")[0];
+    if (formatMainLanguage.equals(queryMainLanguage)) {
       return 1;
     }
     return 0;

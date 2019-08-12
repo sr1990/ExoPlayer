@@ -78,6 +78,16 @@ public abstract class DownloadService extends Service {
       "com.google.android.exoplayer.downloadService.action.REMOVE_DOWNLOAD";
 
   /**
+   * Removes all downloads. Extras:
+   *
+   * <ul>
+   *   <li>{@link #KEY_FOREGROUND} - See {@link #KEY_FOREGROUND}.
+   * </ul>
+   */
+  public static final String ACTION_REMOVE_ALL_DOWNLOADS =
+      "com.google.android.exoplayer.downloadService.action.REMOVE_ALL_DOWNLOADS";
+
+  /**
    * Resumes all downloads except those that have a non-zero {@link Download#stopReason}. Extras:
    *
    * <ul>
@@ -164,6 +174,7 @@ public abstract class DownloadService extends Service {
   @Nullable private final ForegroundNotificationUpdater foregroundNotificationUpdater;
   @Nullable private final String channelId;
   @StringRes private final int channelNameResourceId;
+  @StringRes private final int channelDescriptionResourceId;
 
   private DownloadManager downloadManager;
   private int lastStartId;
@@ -204,7 +215,23 @@ public abstract class DownloadService extends Service {
         foregroundNotificationId,
         foregroundNotificationUpdateInterval,
         /* channelId= */ null,
-        /* channelNameResourceId= */ 0);
+        /* channelNameResourceId= */ 0,
+        /* channelDescriptionResourceId= */ 0);
+  }
+
+  /** @deprecated Use {@link #DownloadService(int, long, String, int, int)}. */
+  @Deprecated
+  protected DownloadService(
+      int foregroundNotificationId,
+      long foregroundNotificationUpdateInterval,
+      @Nullable String channelId,
+      @StringRes int channelNameResourceId) {
+    this(
+        foregroundNotificationId,
+        foregroundNotificationUpdateInterval,
+        channelId,
+        channelNameResourceId,
+        /* channelDescriptionResourceId= */ 0);
   }
 
   /**
@@ -220,25 +247,33 @@ public abstract class DownloadService extends Service {
    *     unique per package. The value may be truncated if it's too long. Ignored if {@code
    *     foregroundNotificationId} is {@link #FOREGROUND_NOTIFICATION_ID_NONE}.
    * @param channelNameResourceId A string resource identifier for the user visible name of the
-   *     channel, if {@code channelId} is specified. The recommended maximum length is 40
-   *     characters. The value may be truncated if it is too long. Ignored if {@code
+   *     notification channel. The recommended maximum length is 40 characters. The value may be
+   *     truncated if it's too long. Ignored if {@code channelId} is null or if {@code
    *     foregroundNotificationId} is {@link #FOREGROUND_NOTIFICATION_ID_NONE}.
+   * @param channelDescriptionResourceId A string resource identifier for the user visible
+   *     description of the notification channel, or 0 if no description is provided. The
+   *     recommended maximum length is 300 characters. The value may be truncated if it is too long.
+   *     Ignored if {@code channelId} is null or if {@code foregroundNotificationId} is {@link
+   *     #FOREGROUND_NOTIFICATION_ID_NONE}.
    */
   protected DownloadService(
       int foregroundNotificationId,
       long foregroundNotificationUpdateInterval,
       @Nullable String channelId,
-      @StringRes int channelNameResourceId) {
+      @StringRes int channelNameResourceId,
+      @StringRes int channelDescriptionResourceId) {
     if (foregroundNotificationId == FOREGROUND_NOTIFICATION_ID_NONE) {
       this.foregroundNotificationUpdater = null;
       this.channelId = null;
       this.channelNameResourceId = 0;
+      this.channelDescriptionResourceId = 0;
     } else {
       this.foregroundNotificationUpdater =
           new ForegroundNotificationUpdater(
               foregroundNotificationId, foregroundNotificationUpdateInterval);
       this.channelId = channelId;
       this.channelNameResourceId = channelNameResourceId;
+      this.channelDescriptionResourceId = channelDescriptionResourceId;
     }
   }
 
@@ -294,6 +329,19 @@ public abstract class DownloadService extends Service {
       Context context, Class<? extends DownloadService> clazz, String id, boolean foreground) {
     return getIntent(context, clazz, ACTION_REMOVE_DOWNLOAD, foreground)
         .putExtra(KEY_CONTENT_ID, id);
+  }
+
+  /**
+   * Builds an {@link Intent} for removing all downloads.
+   *
+   * @param context A {@link Context}.
+   * @param clazz The concrete download service being targeted by the intent.
+   * @param foreground Whether this intent will be used to start the service in the foreground.
+   * @return The created intent.
+   */
+  public static Intent buildRemoveAllDownloadsIntent(
+      Context context, Class<? extends DownloadService> clazz, boolean foreground) {
+    return getIntent(context, clazz, ACTION_REMOVE_ALL_DOWNLOADS, foreground);
   }
 
   /**
@@ -415,6 +463,19 @@ public abstract class DownloadService extends Service {
   }
 
   /**
+   * Starts the service if not started already and removes all downloads.
+   *
+   * @param context A {@link Context}.
+   * @param clazz The concrete download service to be started.
+   * @param foreground Whether the service is started in the foreground.
+   */
+  public static void sendRemoveAllDownloads(
+      Context context, Class<? extends DownloadService> clazz, boolean foreground) {
+    Intent intent = buildRemoveAllDownloadsIntent(context, clazz, foreground);
+    startService(context, intent, foreground);
+  }
+
+  /**
    * Starts the service if not started already and resumes all downloads.
    *
    * @param context A {@link Context}.
@@ -507,7 +568,11 @@ public abstract class DownloadService extends Service {
   public void onCreate() {
     if (channelId != null) {
       NotificationUtil.createNotificationChannel(
-          this, channelId, channelNameResourceId, NotificationUtil.IMPORTANCE_LOW);
+          this,
+          channelId,
+          channelNameResourceId,
+          channelDescriptionResourceId,
+          NotificationUtil.IMPORTANCE_LOW);
     }
     Class<? extends DownloadService> clazz = getClass();
     DownloadManagerHelper downloadManagerHelper = downloadManagerListeners.get(clazz);
@@ -559,6 +624,9 @@ public abstract class DownloadService extends Service {
         } else {
           downloadManager.removeDownload(contentId);
         }
+        break;
+      case ACTION_REMOVE_ALL_DOWNLOADS:
+        downloadManager.removeAllDownloads();
         break;
       case ACTION_RESUME_DOWNLOADS:
         downloadManager.resumeDownloads();
