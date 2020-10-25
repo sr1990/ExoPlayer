@@ -17,6 +17,7 @@ package com.google.android.exoplayer2.source;
 
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
+import com.google.android.exoplayer2.MediaItem;
 import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.upstream.Allocator;
 import com.google.android.exoplayer2.upstream.TransferListener;
@@ -65,38 +66,69 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
   }
 
   private static final int PERIOD_COUNT_UNSET = -1;
+  private static final MediaItem EMPTY_MEDIA_ITEM =
+      new MediaItem.Builder().setMediaId("MergingMediaSource").build();
 
+  private final boolean adjustPeriodTimeOffsets;
   private final MediaSource[] mediaSources;
   private final Timeline[] timelines;
   private final ArrayList<MediaSource> pendingTimelineSources;
   private final CompositeSequenceableLoaderFactory compositeSequenceableLoaderFactory;
 
-  private Object primaryManifest;
   private int periodCount;
-  private IllegalMergeException mergeError;
+  private long[][] periodTimeOffsetsUs;
+  @Nullable private IllegalMergeException mergeError;
 
   /**
+   * Creates a merging media source.
+   *
+   * <p>Offsets between the timestamps in the media sources will not be adjusted.
+   *
    * @param mediaSources The {@link MediaSource}s to merge.
    */
   public MergingMediaSource(MediaSource... mediaSources) {
-    this(new DefaultCompositeSequenceableLoaderFactory(), mediaSources);
+    this(/* adjustPeriodTimeOffsets= */ false, mediaSources);
   }
 
   /**
-   * @param compositeSequenceableLoaderFactory A factory to create composite
-   *     {@link SequenceableLoader}s for when this media source loads data from multiple streams
-   *     (video, audio etc...).
+   * Creates a merging media source.
+   *
+   * @param adjustPeriodTimeOffsets Whether to adjust timestamps of the merged media sources to all
+   *     start at the same time.
    * @param mediaSources The {@link MediaSource}s to merge.
    */
-  public MergingMediaSource(CompositeSequenceableLoaderFactory compositeSequenceableLoaderFactory,
+  public MergingMediaSource(boolean adjustPeriodTimeOffsets, MediaSource... mediaSources) {
+    this(adjustPeriodTimeOffsets, new DefaultCompositeSequenceableLoaderFactory(), mediaSources);
+  }
+
+  /**
+   * Creates a merging media source.
+   *
+   * @param adjustPeriodTimeOffsets Whether to adjust timestamps of the merged media sources to all
+   *     start at the same time.
+   * @param compositeSequenceableLoaderFactory A factory to create composite {@link
+   *     SequenceableLoader}s for when this media source loads data from multiple streams (video,
+   *     audio etc...).
+   * @param mediaSources The {@link MediaSource}s to merge.
+   */
+  public MergingMediaSource(
+      boolean adjustPeriodTimeOffsets,
+      CompositeSequenceableLoaderFactory compositeSequenceableLoaderFactory,
       MediaSource... mediaSources) {
+    this.adjustPeriodTimeOffsets = adjustPeriodTimeOffsets;
     this.mediaSources = mediaSources;
     this.compositeSequenceableLoaderFactory = compositeSequenceableLoaderFactory;
     pendingTimelineSources = new ArrayList<>(Arrays.asList(mediaSources));
     periodCount = PERIOD_COUNT_UNSET;
     timelines = new Timeline[mediaSources.length];
+    periodTimeOffsetsUs = new long[0][];
   }
 
+  /**
+   * @deprecated Use {@link #getMediaItem()} and {@link MediaItem.PlaybackProperties#tag} instead.
+   */
+  @SuppressWarnings("deprecation")
+  @Deprecated
   @Override
   @Nullable
   public Object getTag() {
@@ -104,7 +136,12 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
   }
 
   @Override
-  public void prepareSourceInternal(@Nullable TransferListener mediaTransferListener) {
+  public MediaItem getMediaItem() {
+    return mediaSources.length > 0 ? mediaSources[0].getMediaItem() : EMPTY_MEDIA_ITEM;
+  }
+
+  @Override
+  protected void prepareSourceInternal(@Nullable TransferListener mediaTransferListener) {
     super.prepareSourceInternal(mediaTransferListener);
     for (int i = 0; i < mediaSources.length; i++) {
       prepareChildSource(i, mediaSources[i]);
@@ -126,24 +163,26 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
     for (int i = 0; i < periods.length; i++) {
       MediaPeriodId childMediaPeriodId =
           id.copyWithPeriodUid(timelines[i].getUidOfPeriod(periodIndex));
-      periods[i] = mediaSources[i].createPeriod(childMediaPeriodId, allocator, startPositionUs);
+      periods[i] =
+          mediaSources[i].createPeriod(
+              childMediaPeriodId, allocator, startPositionUs - periodTimeOffsetsUs[periodIndex][i]);
     }
-    return new MergingMediaPeriod(compositeSequenceableLoaderFactory, periods);
+    return new MergingMediaPeriod(
+        compositeSequenceableLoaderFactory, periodTimeOffsetsUs[periodIndex], periods);
   }
 
   @Override
   public void releasePeriod(MediaPeriod mediaPeriod) {
     MergingMediaPeriod mergingPeriod = (MergingMediaPeriod) mediaPeriod;
     for (int i = 0; i < mediaSources.length; i++) {
-      mediaSources[i].releasePeriod(mergingPeriod.periods[i]);
+      mediaSources[i].releasePeriod(mergingPeriod.getChildPeriod(i));
     }
   }
 
   @Override
-  public void releaseSourceInternal() {
+  protected void releaseSourceInternal() {
     super.releaseSourceInternal();
     Arrays.fill(timelines, null);
-    primaryManifest = null;
     periodCount = PERIOD_COUNT_UNSET;
     mergeError = null;
     pendingTimelineSources.clear();
@@ -152,36 +191,47 @@ public final class MergingMediaSource extends CompositeMediaSource<Integer> {
 
   @Override
   protected void onChildSourceInfoRefreshed(
-      Integer id, MediaSource mediaSource, Timeline timeline, @Nullable Object manifest) {
-    if (mergeError == null) {
-      mergeError = checkTimelineMerges(timeline);
-    }
+      Integer id, MediaSource mediaSource, Timeline timeline) {
     if (mergeError != null) {
       return;
     }
+    if (periodCount == PERIOD_COUNT_UNSET) {
+      periodCount = timeline.getPeriodCount();
+    } else if (timeline.getPeriodCount() != periodCount) {
+      mergeError = new IllegalMergeException(IllegalMergeException.REASON_PERIOD_COUNT_MISMATCH);
+      return;
+    }
+    if (periodTimeOffsetsUs.length == 0) {
+      periodTimeOffsetsUs = new long[periodCount][timelines.length];
+    }
     pendingTimelineSources.remove(mediaSource);
     timelines[id] = timeline;
-    if (mediaSource == mediaSources[0]) {
-      primaryManifest = manifest;
-    }
     if (pendingTimelineSources.isEmpty()) {
-      refreshSourceInfo(timelines[0], primaryManifest);
+      if (adjustPeriodTimeOffsets) {
+        computePeriodTimeOffsets();
+      }
+      refreshSourceInfo(timelines[0]);
     }
   }
 
   @Override
-  protected @Nullable MediaPeriodId getMediaPeriodIdForChildMediaPeriodId(
+  @Nullable
+  protected MediaPeriodId getMediaPeriodIdForChildMediaPeriodId(
       Integer id, MediaPeriodId mediaPeriodId) {
     return id == 0 ? mediaPeriodId : null;
   }
 
-  private IllegalMergeException checkTimelineMerges(Timeline timeline) {
-    if (periodCount == PERIOD_COUNT_UNSET) {
-      periodCount = timeline.getPeriodCount();
-    } else if (timeline.getPeriodCount() != periodCount) {
-      return new IllegalMergeException(IllegalMergeException.REASON_PERIOD_COUNT_MISMATCH);
+  private void computePeriodTimeOffsets() {
+    Timeline.Period period = new Timeline.Period();
+    for (int periodIndex = 0; periodIndex < periodCount; periodIndex++) {
+      long primaryWindowOffsetUs =
+          -timelines[0].getPeriod(periodIndex, period).getPositionInWindowUs();
+      for (int timelineIndex = 1; timelineIndex < timelines.length; timelineIndex++) {
+        long secondaryWindowOffsetUs =
+            -timelines[timelineIndex].getPeriod(periodIndex, period).getPositionInWindowUs();
+        periodTimeOffsetsUs[periodIndex][timelineIndex] =
+            primaryWindowOffsetUs - secondaryWindowOffsetUs;
+      }
     }
-    return null;
   }
-
 }

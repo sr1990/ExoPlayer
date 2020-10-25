@@ -15,9 +15,11 @@
  */
 package com.google.android.exoplayer2.trackselection;
 
+import static java.lang.Math.max;
+
+import androidx.annotation.CallSuper;
 import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.ExoPlayerFactory;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.source.TrackGroup;
 import com.google.android.exoplayer2.source.chunk.MediaChunk;
@@ -26,6 +28,7 @@ import com.google.android.exoplayer2.upstream.BandwidthMeter;
 import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.Clock;
 import com.google.android.exoplayer2.util.Util;
+import com.google.common.collect.Iterables;
 import java.util.ArrayList;
 import java.util.List;
 import org.checkerframework.checker.nullness.compatqual.NullableType;
@@ -39,17 +42,12 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
   /** Factory for {@link AdaptiveTrackSelection} instances. */
   public static class Factory implements TrackSelection.Factory {
 
-    private final @Nullable BandwidthMeter bandwidthMeter;
     private final int minDurationForQualityIncreaseMs;
     private final int maxDurationForQualityDecreaseMs;
     private final int minDurationToRetainAfterDiscardMs;
     private final float bandwidthFraction;
     private final float bufferedFractionToLiveEdgeForQualityIncrease;
-    private final long minTimeBetweenBufferReevaluationMs;
     private final Clock clock;
-
-    private TrackBitrateEstimator trackBitrateEstimator;
-    private boolean blockFixedTrackSelectionBandwidth;
 
     /** Creates an adaptive track selection factory with default parameters. */
     public Factory() {
@@ -59,25 +57,6 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
           DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS,
           DEFAULT_BANDWIDTH_FRACTION,
           DEFAULT_BUFFERED_FRACTION_TO_LIVE_EDGE_FOR_QUALITY_INCREASE,
-          DEFAULT_MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS,
-          Clock.DEFAULT);
-    }
-
-    /**
-     * @deprecated Use {@link #Factory()} instead. Custom bandwidth meter should be directly passed
-     *     to the player in {@link ExoPlayerFactory}.
-     */
-    @Deprecated
-    @SuppressWarnings("deprecation")
-    public Factory(BandwidthMeter bandwidthMeter) {
-      this(
-          bandwidthMeter,
-          DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS,
-          DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS,
-          DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS,
-          DEFAULT_BANDWIDTH_FRACTION,
-          DEFAULT_BUFFERED_FRACTION_TO_LIVE_EDGE_FOR_QUALITY_INCREASE,
-          DEFAULT_MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS,
           Clock.DEFAULT);
     }
 
@@ -107,30 +86,6 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
           minDurationToRetainAfterDiscardMs,
           bandwidthFraction,
           DEFAULT_BUFFERED_FRACTION_TO_LIVE_EDGE_FOR_QUALITY_INCREASE,
-          DEFAULT_MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS,
-          Clock.DEFAULT);
-    }
-
-    /**
-     * @deprecated Use {@link #Factory(int, int, int, float)} instead. Custom bandwidth meter should
-     *     be directly passed to the player in {@link ExoPlayerFactory}.
-     */
-    @Deprecated
-    @SuppressWarnings("deprecation")
-    public Factory(
-        BandwidthMeter bandwidthMeter,
-        int minDurationForQualityIncreaseMs,
-        int maxDurationForQualityDecreaseMs,
-        int minDurationToRetainAfterDiscardMs,
-        float bandwidthFraction) {
-      this(
-          bandwidthMeter,
-          minDurationForQualityIncreaseMs,
-          maxDurationForQualityDecreaseMs,
-          minDurationToRetainAfterDiscardMs,
-          bandwidthFraction,
-          DEFAULT_BUFFERED_FRACTION_TO_LIVE_EDGE_FOR_QUALITY_INCREASE,
-          DEFAULT_MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS,
           Clock.DEFAULT);
     }
 
@@ -154,100 +109,33 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
      *     applied when the playback position is closer to the live edge than {@code
      *     minDurationForQualityIncreaseMs}, which would otherwise prevent switching to a higher
      *     quality from happening.
-     * @param minTimeBetweenBufferReevaluationMs The track selection may periodically reevaluate its
-     *     buffer and discard some chunks of lower quality to improve the playback quality if
-     *     network conditions have changed. This is the minimum duration between 2 consecutive
-     *     buffer reevaluation calls.
      * @param clock A {@link Clock}.
      */
-    @SuppressWarnings("deprecation")
     public Factory(
         int minDurationForQualityIncreaseMs,
         int maxDurationForQualityDecreaseMs,
         int minDurationToRetainAfterDiscardMs,
         float bandwidthFraction,
         float bufferedFractionToLiveEdgeForQualityIncrease,
-        long minTimeBetweenBufferReevaluationMs,
         Clock clock) {
-      this(
-          /* bandwidthMeter= */ null,
-          minDurationForQualityIncreaseMs,
-          maxDurationForQualityDecreaseMs,
-          minDurationToRetainAfterDiscardMs,
-          bandwidthFraction,
-          bufferedFractionToLiveEdgeForQualityIncrease,
-          minTimeBetweenBufferReevaluationMs,
-          clock);
-    }
-
-    /**
-     * @deprecated Use {@link #Factory(int, int, int, float, float, long, Clock)} instead. Custom
-     *     bandwidth meter should be directly passed to the player in {@link ExoPlayerFactory}.
-     */
-    @Deprecated
-    public Factory(
-        @Nullable BandwidthMeter bandwidthMeter,
-        int minDurationForQualityIncreaseMs,
-        int maxDurationForQualityDecreaseMs,
-        int minDurationToRetainAfterDiscardMs,
-        float bandwidthFraction,
-        float bufferedFractionToLiveEdgeForQualityIncrease,
-        long minTimeBetweenBufferReevaluationMs,
-        Clock clock) {
-      this.bandwidthMeter = bandwidthMeter;
       this.minDurationForQualityIncreaseMs = minDurationForQualityIncreaseMs;
       this.maxDurationForQualityDecreaseMs = maxDurationForQualityDecreaseMs;
       this.minDurationToRetainAfterDiscardMs = minDurationToRetainAfterDiscardMs;
       this.bandwidthFraction = bandwidthFraction;
       this.bufferedFractionToLiveEdgeForQualityIncrease =
           bufferedFractionToLiveEdgeForQualityIncrease;
-      this.minTimeBetweenBufferReevaluationMs = minTimeBetweenBufferReevaluationMs;
       this.clock = clock;
-      trackBitrateEstimator = TrackBitrateEstimator.DEFAULT;
-    }
-
-    /**
-     * Sets a TrackBitrateEstimator.
-     *
-     * <p>This method is experimental, and will be renamed or removed in a future release.
-     *
-     * @param trackBitrateEstimator A {@link TrackBitrateEstimator}.
-     */
-    public final void experimental_setTrackBitrateEstimator(
-        TrackBitrateEstimator trackBitrateEstimator) {
-      this.trackBitrateEstimator = trackBitrateEstimator;
-    }
-
-    /**
-     * Enables blocking of the total fixed track selection bandwidth.
-     *
-     * <p>This method is experimental, and will be renamed or removed in a future release.
-     */
-    public final void experimental_enableBlockFixedTrackSelectionBandwidth() {
-      this.blockFixedTrackSelectionBandwidth = true;
     }
 
     @Override
     public final @NullableType TrackSelection[] createTrackSelections(
         @NullableType Definition[] definitions, BandwidthMeter bandwidthMeter) {
-      if (this.bandwidthMeter != null) {
-        bandwidthMeter = this.bandwidthMeter;
-      }
       TrackSelection[] selections = new TrackSelection[definitions.length];
-      List<AdaptiveTrackSelection> adaptiveSelections = new ArrayList<>();
       int totalFixedBandwidth = 0;
       for (int i = 0; i < definitions.length; i++) {
         Definition definition = definitions[i];
-        if (definition == null) {
-          continue;
-        }
-        if (definition.tracks.length > 1) {
-          AdaptiveTrackSelection adaptiveSelection =
-              createAdaptiveTrackSelection(definition.group, bandwidthMeter, definition.tracks);
-          adaptiveSelection.experimental_setTrackBitrateEstimator(trackBitrateEstimator);
-          adaptiveSelections.add(adaptiveSelection);
-          selections[i] = adaptiveSelection;
-        } else {
+        if (definition != null && definition.tracks.length == 1) {
+          // Make fixed selections first to know their total bandwidth.
           selections[i] =
               new FixedTrackSelection(
                   definition.group, definition.tracks[0], definition.reason, definition.data);
@@ -257,9 +145,15 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
           }
         }
       }
-      if (blockFixedTrackSelectionBandwidth) {
-        for (int i = 0; i < adaptiveSelections.size(); i++) {
-          adaptiveSelections.get(i).experimental_setNonAllocatableBandwidth(totalFixedBandwidth);
+      List<AdaptiveTrackSelection> adaptiveSelections = new ArrayList<>();
+      for (int i = 0; i < definitions.length; i++) {
+        Definition definition = definitions[i];
+        if (definition != null && definition.tracks.length > 1) {
+          AdaptiveTrackSelection adaptiveSelection =
+              createAdaptiveTrackSelection(
+                  definition.group, bandwidthMeter, definition.tracks, totalFixedBandwidth);
+          adaptiveSelections.add(adaptiveSelection);
+          selections[i] = adaptiveSelection;
         }
       }
       if (adaptiveSelections.size() > 1) {
@@ -276,7 +170,7 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
         for (int i = 0; i < adaptiveSelections.size(); i++) {
           adaptiveSelections
               .get(i)
-              .experimental_setBandwidthAllocationCheckpoints(bandwidthCheckpoints[i]);
+              .experimentalSetBandwidthAllocationCheckpoints(bandwidthCheckpoints[i]);
         }
       }
       return selections;
@@ -288,46 +182,47 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
      * @param group The {@link TrackGroup}.
      * @param bandwidthMeter A {@link BandwidthMeter} which can be used to select tracks.
      * @param tracks The indices of the selected tracks in the track group.
+     * @param totalFixedTrackBandwidth The total bandwidth used by all non-adaptive tracks, in bits
+     *     per second.
      * @return An {@link AdaptiveTrackSelection} for the specified tracks.
      */
     protected AdaptiveTrackSelection createAdaptiveTrackSelection(
-        TrackGroup group, BandwidthMeter bandwidthMeter, int[] tracks) {
+        TrackGroup group,
+        BandwidthMeter bandwidthMeter,
+        int[] tracks,
+        int totalFixedTrackBandwidth) {
       return new AdaptiveTrackSelection(
           group,
           tracks,
-          new DefaultBandwidthProvider(bandwidthMeter, bandwidthFraction),
+          new DefaultBandwidthProvider(bandwidthMeter, bandwidthFraction, totalFixedTrackBandwidth),
           minDurationForQualityIncreaseMs,
           maxDurationForQualityDecreaseMs,
           minDurationToRetainAfterDiscardMs,
           bufferedFractionToLiveEdgeForQualityIncrease,
-          minTimeBetweenBufferReevaluationMs,
           clock);
     }
   }
 
-  public static final int DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS = 10000;
-  public static final int DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS = 25000;
-  public static final int DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS = 25000;
-  public static final float DEFAULT_BANDWIDTH_FRACTION = 0.75f;
+  public static final int DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS = 10_000;
+  public static final int DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS = 25_000;
+  public static final int DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS = 25_000;
+  public static final float DEFAULT_BANDWIDTH_FRACTION = 0.7f;
   public static final float DEFAULT_BUFFERED_FRACTION_TO_LIVE_EDGE_FOR_QUALITY_INCREASE = 0.75f;
-  public static final long DEFAULT_MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS = 2000;
+
+  private static final long MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS = 1000;
 
   private final BandwidthProvider bandwidthProvider;
   private final long minDurationForQualityIncreaseUs;
   private final long maxDurationForQualityDecreaseUs;
   private final long minDurationToRetainAfterDiscardUs;
   private final float bufferedFractionToLiveEdgeForQualityIncrease;
-  private final long minTimeBetweenBufferReevaluationMs;
   private final Clock clock;
-  private final Format[] formats;
-  private final int[] formatBitrates;
-  private final int[] trackBitrates;
 
-  private TrackBitrateEstimator trackBitrateEstimator;
   private float playbackSpeed;
   private int selectedIndex;
   private int reason;
   private long lastBufferEvaluationMs;
+  @Nullable private MediaChunk lastBufferEvaluationMediaChunk;
 
   /**
    * @param group The {@link TrackGroup}.
@@ -341,12 +236,12 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
         group,
         tracks,
         bandwidthMeter,
+        /* reservedBandwidth= */ 0,
         DEFAULT_MIN_DURATION_FOR_QUALITY_INCREASE_MS,
         DEFAULT_MAX_DURATION_FOR_QUALITY_DECREASE_MS,
         DEFAULT_MIN_DURATION_TO_RETAIN_AFTER_DISCARD_MS,
         DEFAULT_BANDWIDTH_FRACTION,
         DEFAULT_BUFFERED_FRACTION_TO_LIVE_EDGE_FOR_QUALITY_INCREASE,
-        DEFAULT_MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS,
         Clock.DEFAULT);
   }
 
@@ -355,6 +250,8 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
    * @param tracks The indices of the selected tracks within the {@link TrackGroup}. Must not be
    *     empty. May be in any order.
    * @param bandwidthMeter Provides an estimate of the currently available bandwidth.
+   * @param reservedBandwidth The reserved bandwidth, which shouldn't be considered available for
+   *     use, in bits per second.
    * @param minDurationForQualityIncreaseMs The minimum duration of buffered data required for the
    *     selected track to switch to one of higher quality.
    * @param maxDurationForQualityDecreaseMs The maximum duration of buffered data required for the
@@ -372,31 +269,26 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
    *     when the playback position is closer to the live edge than {@code
    *     minDurationForQualityIncreaseMs}, which would otherwise prevent switching to a higher
    *     quality from happening.
-   * @param minTimeBetweenBufferReevaluationMs The track selection may periodically reevaluate its
-   *     buffer and discard some chunks of lower quality to improve the playback quality if network
-   *     condition has changed. This is the minimum duration between 2 consecutive buffer
-   *     reevaluation calls.
    */
   public AdaptiveTrackSelection(
       TrackGroup group,
       int[] tracks,
       BandwidthMeter bandwidthMeter,
+      long reservedBandwidth,
       long minDurationForQualityIncreaseMs,
       long maxDurationForQualityDecreaseMs,
       long minDurationToRetainAfterDiscardMs,
       float bandwidthFraction,
       float bufferedFractionToLiveEdgeForQualityIncrease,
-      long minTimeBetweenBufferReevaluationMs,
       Clock clock) {
     this(
         group,
         tracks,
-        new DefaultBandwidthProvider(bandwidthMeter, bandwidthFraction),
+        new DefaultBandwidthProvider(bandwidthMeter, bandwidthFraction, reservedBandwidth),
         minDurationForQualityIncreaseMs,
         maxDurationForQualityDecreaseMs,
         minDurationToRetainAfterDiscardMs,
         bufferedFractionToLiveEdgeForQualityIncrease,
-        minTimeBetweenBufferReevaluationMs,
         clock);
   }
 
@@ -408,7 +300,6 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
       long maxDurationForQualityDecreaseMs,
       long minDurationToRetainAfterDiscardMs,
       float bufferedFractionToLiveEdgeForQualityIncrease,
-      long minTimeBetweenBufferReevaluationMs,
       Clock clock) {
     super(group, tracks);
     this.bandwidthProvider = bandwidthProvider;
@@ -417,44 +308,10 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
     this.minDurationToRetainAfterDiscardUs = minDurationToRetainAfterDiscardMs * 1000L;
     this.bufferedFractionToLiveEdgeForQualityIncrease =
         bufferedFractionToLiveEdgeForQualityIncrease;
-    this.minTimeBetweenBufferReevaluationMs = minTimeBetweenBufferReevaluationMs;
     this.clock = clock;
     playbackSpeed = 1f;
     reason = C.SELECTION_REASON_UNKNOWN;
     lastBufferEvaluationMs = C.TIME_UNSET;
-    trackBitrateEstimator = TrackBitrateEstimator.DEFAULT;
-    formats = new Format[length];
-    formatBitrates = new int[length];
-    trackBitrates = new int[length];
-    for (int i = 0; i < length; i++) {
-      @SuppressWarnings("nullness:method.invocation.invalid")
-      Format format = getFormat(i);
-      formats[i] = format;
-      formatBitrates[i] = formats[i].bitrate;
-    }
-  }
-
-  /**
-   * Sets a TrackBitrateEstimator.
-   *
-   * <p>This method is experimental, and will be renamed or removed in a future release.
-   *
-   * @param trackBitrateEstimator A {@link TrackBitrateEstimator}.
-   */
-  public void experimental_setTrackBitrateEstimator(TrackBitrateEstimator trackBitrateEstimator) {
-    this.trackBitrateEstimator = trackBitrateEstimator;
-  }
-
-  /**
-   * Sets the non-allocatable bandwidth, which shouldn't be considered available.
-   *
-   * <p>This method is experimental, and will be renamed or removed in a future release.
-   *
-   * @param nonAllocatableBandwidth The non-allocatable bandwidth in bits per second.
-   */
-  public void experimental_setNonAllocatableBandwidth(long nonAllocatableBandwidth) {
-    ((DefaultBandwidthProvider) bandwidthProvider)
-        .experimental_setNonAllocatableBandwidth(nonAllocatableBandwidth);
   }
 
   /**
@@ -463,14 +320,23 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
    * @param allocationCheckpoints List of checkpoints. Each element must be a long[2], with [0]
    *     being the total bandwidth and [1] being the allocated bandwidth.
    */
-  public void experimental_setBandwidthAllocationCheckpoints(long[][] allocationCheckpoints) {
+  public void experimentalSetBandwidthAllocationCheckpoints(long[][] allocationCheckpoints) {
     ((DefaultBandwidthProvider) bandwidthProvider)
-        .experimental_setBandwidthAllocationCheckpoints(allocationCheckpoints);
+        .experimentalSetBandwidthAllocationCheckpoints(allocationCheckpoints);
   }
 
+  @CallSuper
   @Override
   public void enable() {
     lastBufferEvaluationMs = C.TIME_UNSET;
+    lastBufferEvaluationMediaChunk = null;
+  }
+
+  @CallSuper
+  @Override
+  public void disable() {
+    // Avoid keeping a reference to a MediaChunk in case it prevents garbage collection.
+    lastBufferEvaluationMediaChunk = null;
   }
 
   @Override
@@ -487,43 +353,42 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
       MediaChunkIterator[] mediaChunkIterators) {
     long nowMs = clock.elapsedRealtime();
 
-    // Update the estimated track bitrates.
-    trackBitrateEstimator.getBitrates(formats, queue, mediaChunkIterators, trackBitrates);
-
     // Make initial selection
     if (reason == C.SELECTION_REASON_UNKNOWN) {
       reason = C.SELECTION_REASON_INITIAL;
-      selectedIndex = determineIdealSelectedIndex(nowMs, trackBitrates);
+      selectedIndex = determineIdealSelectedIndex(nowMs);
       return;
     }
 
-    // Stash the current selection, then make a new one.
-    int currentSelectedIndex = selectedIndex;
-    selectedIndex = determineIdealSelectedIndex(nowMs, trackBitrates);
-    if (selectedIndex == currentSelectedIndex) {
-      return;
+    int previousSelectedIndex = selectedIndex;
+    int previousReason = reason;
+    int formatIndexOfPreviousChunk =
+        queue.isEmpty() ? C.INDEX_UNSET : indexOf(Iterables.getLast(queue).trackFormat);
+    if (formatIndexOfPreviousChunk != C.INDEX_UNSET) {
+      previousSelectedIndex = formatIndexOfPreviousChunk;
+      previousReason = Iterables.getLast(queue).trackSelectionReason;
     }
-
-    if (!isBlacklisted(currentSelectedIndex, nowMs)) {
-      // Revert back to the current selection if conditions are not suitable for switching.
-      Format currentFormat = getFormat(currentSelectedIndex);
-      Format selectedFormat = getFormat(selectedIndex);
+    int newSelectedIndex = determineIdealSelectedIndex(nowMs);
+    if (!isBlacklisted(previousSelectedIndex, nowMs)) {
+      // Revert back to the previous selection if conditions are not suitable for switching.
+      Format currentFormat = getFormat(previousSelectedIndex);
+      Format selectedFormat = getFormat(newSelectedIndex);
       if (selectedFormat.bitrate > currentFormat.bitrate
           && bufferedDurationUs < minDurationForQualityIncreaseUs(availableDurationUs)) {
         // The selected track is a higher quality, but we have insufficient buffer to safely switch
         // up. Defer switching up for now.
-        selectedIndex = currentSelectedIndex;
+        newSelectedIndex = previousSelectedIndex;
       } else if (selectedFormat.bitrate < currentFormat.bitrate
           && bufferedDurationUs >= maxDurationForQualityDecreaseUs) {
         // The selected track is a lower quality, but we have sufficient buffer to defer switching
         // down for now.
-        selectedIndex = currentSelectedIndex;
+        newSelectedIndex = previousSelectedIndex;
       }
     }
     // If we adapted, update the trigger.
-    if (selectedIndex != currentSelectedIndex) {
-      reason = C.SELECTION_REASON_ADAPTIVE;
-    }
+    reason =
+        newSelectedIndex == previousSelectedIndex ? previousReason : C.SELECTION_REASON_ADAPTIVE;
+    selectedIndex = newSelectedIndex;
   }
 
   @Override
@@ -537,22 +402,23 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
   }
 
   @Override
-  public @Nullable Object getSelectionData() {
+  @Nullable
+  public Object getSelectionData() {
     return null;
   }
 
   @Override
   public int evaluateQueueSize(long playbackPositionUs, List<? extends MediaChunk> queue) {
     long nowMs = clock.elapsedRealtime();
-    if (!shouldEvaluateQueueSize(nowMs)) {
+    if (!shouldEvaluateQueueSize(nowMs, queue)) {
       return queue.size();
     }
-
     lastBufferEvaluationMs = nowMs;
+    lastBufferEvaluationMediaChunk = queue.isEmpty() ? null : Iterables.getLast(queue);
+
     if (queue.isEmpty()) {
       return 0;
     }
-
     int queueSize = queue.size();
     MediaChunk lastChunk = queue.get(queueSize - 1);
     long playoutBufferedDurationBeforeLastChunkUs =
@@ -562,7 +428,7 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
     if (playoutBufferedDurationBeforeLastChunkUs < minDurationToRetainAfterDiscardUs) {
       return queueSize;
     }
-    int idealSelectedIndex = determineIdealSelectedIndex(nowMs, formatBitrates);
+    int idealSelectedIndex = determineIdealSelectedIndex(nowMs);
     Format idealFormat = getFormat(idealSelectedIndex);
     // If the chunks contain video, discard from the first SD chunk beyond
     // minDurationToRetainAfterDiscardUs whose resolution and bitrate are both lower than the ideal
@@ -605,11 +471,13 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
    * performed.
    *
    * @param nowMs The current value of {@link Clock#elapsedRealtime()}.
+   * @param queue The queue of buffered {@link MediaChunk MediaChunks}. Must not be modified.
    * @return Whether an evaluation should be performed.
    */
-  protected boolean shouldEvaluateQueueSize(long nowMs) {
+  protected boolean shouldEvaluateQueueSize(long nowMs, List<? extends MediaChunk> queue) {
     return lastBufferEvaluationMs == C.TIME_UNSET
-        || nowMs - lastBufferEvaluationMs >= minTimeBetweenBufferReevaluationMs;
+        || nowMs - lastBufferEvaluationMs >= MIN_TIME_BETWEEN_BUFFER_REEVALUTATION_MS
+        || (!queue.isEmpty() && !Iterables.getLast(queue).equals(lastBufferEvaluationMediaChunk));
   }
 
   /**
@@ -626,24 +494,22 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
    * Computes the ideal selected index ignoring buffer health.
    *
    * @param nowMs The current time in the timebase of {@link Clock#elapsedRealtime()}, or {@link
-   *     Long#MIN_VALUE} to ignore blacklisting.
-   * @param trackBitrates The estimated track bitrates. May differ from format bitrates if more
-   *     accurate estimates of the current track bitrates are available.
+   *     Long#MIN_VALUE} to ignore track exclusion.
    */
-  private int determineIdealSelectedIndex(long nowMs, int[] trackBitrates) {
+  private int determineIdealSelectedIndex(long nowMs) {
     long effectiveBitrate = bandwidthProvider.getAllocatedBandwidth();
-    int lowestBitrateNonBlacklistedIndex = 0;
+    int lowestBitrateAllowedIndex = 0;
     for (int i = 0; i < length; i++) {
       if (nowMs == Long.MIN_VALUE || !isBlacklisted(i, nowMs)) {
         Format format = getFormat(i);
-        if (canSelectFormat(format, trackBitrates[i], playbackSpeed, effectiveBitrate)) {
+        if (canSelectFormat(format, format.bitrate, playbackSpeed, effectiveBitrate)) {
           return i;
         } else {
-          lowestBitrateNonBlacklistedIndex = i;
+          lowestBitrateAllowedIndex = i;
         }
       }
     }
-    return lowestBitrateNonBlacklistedIndex;
+    return lowestBitrateAllowedIndex;
   }
 
   private long minDurationForQualityIncreaseUs(long availableDurationUs) {
@@ -665,20 +531,21 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
 
     private final BandwidthMeter bandwidthMeter;
     private final float bandwidthFraction;
-
-    private long nonAllocatableBandwidth;
+    private final long reservedBandwidth;
 
     @Nullable private long[][] allocationCheckpoints;
 
-    /* package */ DefaultBandwidthProvider(BandwidthMeter bandwidthMeter, float bandwidthFraction) {
+    /* package */ DefaultBandwidthProvider(
+        BandwidthMeter bandwidthMeter, float bandwidthFraction, long reservedBandwidth) {
       this.bandwidthMeter = bandwidthMeter;
       this.bandwidthFraction = bandwidthFraction;
+      this.reservedBandwidth = reservedBandwidth;
     }
 
     @Override
     public long getAllocatedBandwidth() {
       long totalBandwidth = (long) (bandwidthMeter.getBitrateEstimate() * bandwidthFraction);
-      long allocatableBandwidth = Math.max(0L, totalBandwidth - nonAllocatableBandwidth);
+      long allocatableBandwidth = max(0L, totalBandwidth - reservedBandwidth);
       if (allocationCheckpoints == null) {
         return allocatableBandwidth;
       }
@@ -694,11 +561,7 @@ public class AdaptiveTrackSelection extends BaseTrackSelection {
       return previous[1] + (long) (fractionBetweenCheckpoints * (next[1] - previous[1]));
     }
 
-    /* package */ void experimental_setNonAllocatableBandwidth(long nonAllocatableBandwidth) {
-      this.nonAllocatableBandwidth = nonAllocatableBandwidth;
-    }
-
-    /* package */ void experimental_setBandwidthAllocationCheckpoints(
+    /* package */ void experimentalSetBandwidthAllocationCheckpoints(
         long[][] allocationCheckpoints) {
       Assertions.checkArgument(allocationCheckpoints.length >= 2);
       this.allocationCheckpoints = allocationCheckpoints;

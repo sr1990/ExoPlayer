@@ -15,6 +15,9 @@
  */
 package com.google.android.exoplayer2.upstream;
 
+import static com.google.android.exoplayer2.util.Util.castNonNull;
+import static java.lang.Math.min;
+
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.res.AssetFileDescriptor;
@@ -43,9 +46,9 @@ public final class ContentDataSource extends BaseDataSource {
 
   private final ContentResolver resolver;
 
-  private @Nullable Uri uri;
-  private @Nullable AssetFileDescriptor assetFileDescriptor;
-  private @Nullable FileInputStream inputStream;
+  @Nullable private Uri uri;
+  @Nullable private AssetFileDescriptor assetFileDescriptor;
+  @Nullable private FileInputStream inputStream;
   private long bytesRemaining;
   private boolean opened;
 
@@ -57,30 +60,21 @@ public final class ContentDataSource extends BaseDataSource {
     this.resolver = context.getContentResolver();
   }
 
-  /**
-   * @param context A context.
-   * @param listener An optional listener.
-   * @deprecated Use {@link #ContentDataSource(Context)} and {@link
-   *     #addTransferListener(TransferListener)}.
-   */
-  @Deprecated
-  public ContentDataSource(Context context, @Nullable TransferListener listener) {
-    this(context);
-    if (listener != null) {
-      addTransferListener(listener);
-    }
-  }
-
   @Override
   public long open(DataSpec dataSpec) throws ContentDataSourceException {
     try {
-      uri = dataSpec.uri;
+      Uri uri = dataSpec.uri;
+      this.uri = uri;
+
       transferInitializing(dataSpec);
-      assetFileDescriptor = resolver.openAssetFileDescriptor(uri, "r");
+      AssetFileDescriptor assetFileDescriptor = resolver.openAssetFileDescriptor(uri, "r");
+      this.assetFileDescriptor = assetFileDescriptor;
       if (assetFileDescriptor == null) {
         throw new FileNotFoundException("Could not open file descriptor for: " + uri);
       }
-      inputStream = new FileInputStream(assetFileDescriptor.getFileDescriptor());
+      FileInputStream inputStream = new FileInputStream(assetFileDescriptor.getFileDescriptor());
+      this.inputStream = inputStream;
+
       long assetStartOffset = assetFileDescriptor.getStartOffset();
       long skipped = inputStream.skip(assetStartOffset + dataSpec.position) - assetStartOffset;
       if (skipped != dataSpec.position) {
@@ -97,9 +91,19 @@ public final class ContentDataSource extends BaseDataSource {
           // returns 0 then the remaining length cannot be determined.
           FileChannel channel = inputStream.getChannel();
           long channelSize = channel.size();
-          bytesRemaining = channelSize == 0 ? C.LENGTH_UNSET : channelSize - channel.position();
+          if (channelSize == 0) {
+            bytesRemaining = C.LENGTH_UNSET;
+          } else {
+            bytesRemaining = channelSize - channel.position();
+            if (bytesRemaining < 0) {
+              throw new EOFException();
+            }
+          }
         } else {
           bytesRemaining = assetFileDescriptorLength - skipped;
+          if (bytesRemaining < 0) {
+            throw new EOFException();
+          }
         }
       }
     } catch (IOException e) {
@@ -122,9 +126,9 @@ public final class ContentDataSource extends BaseDataSource {
 
     int bytesRead;
     try {
-      int bytesToRead = bytesRemaining == C.LENGTH_UNSET ? readLength
-          : (int) Math.min(bytesRemaining, readLength);
-      bytesRead = inputStream.read(buffer, offset, bytesToRead);
+      int bytesToRead =
+          bytesRemaining == C.LENGTH_UNSET ? readLength : (int) min(bytesRemaining, readLength);
+      bytesRead = castNonNull(inputStream).read(buffer, offset, bytesToRead);
     } catch (IOException e) {
       throw new ContentDataSourceException(e);
     }
@@ -144,7 +148,8 @@ public final class ContentDataSource extends BaseDataSource {
   }
 
   @Override
-  public @Nullable Uri getUri() {
+  @Nullable
+  public Uri getUri() {
     return uri;
   }
 

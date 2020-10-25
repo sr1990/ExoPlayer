@@ -15,17 +15,23 @@
  */
 package com.google.android.exoplayer2.source.dash;
 
+import static java.lang.Math.min;
+
+import android.util.Pair;
+import android.util.SparseArray;
+import android.util.SparseIntArray;
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
-import android.util.Pair;
-import android.util.SparseIntArray;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.SeekParameters;
+import com.google.android.exoplayer2.drm.DrmSessionEventListener;
+import com.google.android.exoplayer2.drm.DrmSessionManager;
 import com.google.android.exoplayer2.offline.StreamKey;
 import com.google.android.exoplayer2.source.CompositeSequenceableLoaderFactory;
 import com.google.android.exoplayer2.source.EmptySampleStream;
 import com.google.android.exoplayer2.source.MediaPeriod;
+import com.google.android.exoplayer2.source.MediaSourceEventListener;
 import com.google.android.exoplayer2.source.MediaSourceEventListener.EventDispatcher;
 import com.google.android.exoplayer2.source.SampleStream;
 import com.google.android.exoplayer2.source.SequenceableLoader;
@@ -48,6 +54,7 @@ import com.google.android.exoplayer2.upstream.LoaderErrorThrower;
 import com.google.android.exoplayer2.upstream.TransferListener;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.google.android.exoplayer2.util.Util;
+import com.google.common.primitives.Ints;
 import java.io.IOException;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
@@ -58,6 +65,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.checkerframework.checker.nullness.compatqual.NullableType;
 
 /** A DASH {@link MediaPeriod}. */
 /* package */ final class DashMediaPeriod
@@ -65,11 +73,16 @@ import java.util.regex.Pattern;
         SequenceableLoader.Callback<ChunkSampleStream<DashChunkSource>>,
         ChunkSampleStream.ReleaseCallback<DashChunkSource> {
 
+  // Defined by ANSI/SCTE 214-1 2016 7.2.3.
   private static final Pattern CEA608_SERVICE_DESCRIPTOR_REGEX = Pattern.compile("CC([1-4])=(.+)");
+  // Defined by ANSI/SCTE 214-1 2016 7.2.2.
+  private static final Pattern CEA708_SERVICE_DESCRIPTOR_REGEX =
+      Pattern.compile("([1-4])=lang:(\\w+)(,.+)?");
 
   /* package */ final int id;
   private final DashChunkSource.Factory chunkSourceFactory;
-  private final @Nullable TransferListener transferListener;
+  @Nullable private final TransferListener transferListener;
+  private final DrmSessionManager drmSessionManager;
   private final LoadErrorHandlingPolicy loadErrorHandlingPolicy;
   private final long elapsedRealtimeOffsetMs;
   private final LoaderErrorThrower manifestLoaderErrorThrower;
@@ -80,16 +93,16 @@ import java.util.regex.Pattern;
   private final PlayerEmsgHandler playerEmsgHandler;
   private final IdentityHashMap<ChunkSampleStream<DashChunkSource>, PlayerTrackEmsgHandler>
       trackEmsgHandlerBySampleStream;
-  private final EventDispatcher eventDispatcher;
+  private final MediaSourceEventListener.EventDispatcher mediaSourceEventDispatcher;
+  private final DrmSessionEventListener.EventDispatcher drmEventDispatcher;
 
-  private @Nullable Callback callback;
+  @Nullable private Callback callback;
   private ChunkSampleStream<DashChunkSource>[] sampleStreams;
   private EventSampleStream[] eventSampleStreams;
   private SequenceableLoader compositeSequenceableLoader;
   private DashManifest manifest;
   private int periodIndex;
   private List<EventStream> eventStreams;
-  private boolean notifiedReadingStarted;
 
   public DashMediaPeriod(
       int id,
@@ -97,8 +110,10 @@ import java.util.regex.Pattern;
       int periodIndex,
       DashChunkSource.Factory chunkSourceFactory,
       @Nullable TransferListener transferListener,
+      DrmSessionManager drmSessionManager,
+      DrmSessionEventListener.EventDispatcher drmEventDispatcher,
       LoadErrorHandlingPolicy loadErrorHandlingPolicy,
-      EventDispatcher eventDispatcher,
+      EventDispatcher mediaSourceEventDispatcher,
       long elapsedRealtimeOffsetMs,
       LoaderErrorThrower manifestLoaderErrorThrower,
       Allocator allocator,
@@ -109,8 +124,10 @@ import java.util.regex.Pattern;
     this.periodIndex = periodIndex;
     this.chunkSourceFactory = chunkSourceFactory;
     this.transferListener = transferListener;
+    this.drmSessionManager = drmSessionManager;
+    this.drmEventDispatcher = drmEventDispatcher;
     this.loadErrorHandlingPolicy = loadErrorHandlingPolicy;
-    this.eventDispatcher = eventDispatcher;
+    this.mediaSourceEventDispatcher = mediaSourceEventDispatcher;
     this.elapsedRealtimeOffsetMs = elapsedRealtimeOffsetMs;
     this.manifestLoaderErrorThrower = manifestLoaderErrorThrower;
     this.allocator = allocator;
@@ -123,11 +140,10 @@ import java.util.regex.Pattern;
         compositeSequenceableLoaderFactory.createCompositeSequenceableLoader(sampleStreams);
     Period period = manifest.getPeriod(periodIndex);
     eventStreams = period.eventStreams;
-    Pair<TrackGroupArray, TrackGroupInfo[]> result = buildTrackGroups(period.adaptationSets,
-        eventStreams);
+    Pair<TrackGroupArray, TrackGroupInfo[]> result =
+        buildTrackGroups(drmSessionManager, period.adaptationSets, eventStreams);
     trackGroups = result.first;
     trackGroupInfos = result.second;
-    eventDispatcher.mediaPeriodCreated();
   }
 
   /**
@@ -166,7 +182,6 @@ import java.util.regex.Pattern;
       sampleStream.release(this);
     }
     callback = null;
-    eventDispatcher.mediaPeriodReleased();
   }
 
   // ChunkSampleStream.ReleaseCallback implementation.
@@ -219,9 +234,8 @@ import java.util.regex.Pattern;
       int totalTracksInPreviousAdaptationSets = 0;
       int tracksInCurrentAdaptationSet =
           manifestAdaptationSets.get(adaptationSetIndices[0]).representations.size();
-      for (int i = 0; i < trackIndices.length; i++) {
-        while (trackIndices[i]
-            >= totalTracksInPreviousAdaptationSets + tracksInCurrentAdaptationSet) {
+      for (int trackIndex : trackIndices) {
+        while (trackIndex >= totalTracksInPreviousAdaptationSets + tracksInCurrentAdaptationSet) {
           currentAdaptationSetIndex++;
           totalTracksInPreviousAdaptationSets += tracksInCurrentAdaptationSet;
           tracksInCurrentAdaptationSet =
@@ -234,15 +248,19 @@ import java.util.regex.Pattern;
             new StreamKey(
                 periodIndex,
                 adaptationSetIndices[currentAdaptationSetIndex],
-                trackIndices[i] - totalTracksInPreviousAdaptationSets));
+                trackIndex - totalTracksInPreviousAdaptationSets));
       }
     }
     return streamKeys;
   }
 
   @Override
-  public long selectTracks(TrackSelection[] selections, boolean[] mayRetainStreamFlags,
-      SampleStream[] streams, boolean[] streamResetFlags, long positionUs) {
+  public long selectTracks(
+      @NullableType TrackSelection[] selections,
+      boolean[] mayRetainStreamFlags,
+      @NullableType SampleStream[] streams,
+      boolean[] streamResetFlags,
+      long positionUs) {
     int[] streamIndexToTrackGroupIndex = getStreamIndexToTrackGroupIndex(selections);
     releaseDisabledStreams(selections, mayRetainStreamFlags, streams);
     releaseOrphanEmbeddedStreams(selections, streams, streamIndexToTrackGroupIndex);
@@ -289,16 +307,17 @@ import java.util.regex.Pattern;
   }
 
   @Override
+  public boolean isLoading() {
+    return compositeSequenceableLoader.isLoading();
+  }
+
+  @Override
   public long getNextLoadPositionUs() {
     return compositeSequenceableLoader.getNextLoadPositionUs();
   }
 
   @Override
   public long readDiscontinuity() {
-    if (!notifiedReadingStarted) {
-      eventDispatcher.readingStarted();
-      notifiedReadingStarted = true;
-    }
     return C.TIME_UNSET;
   }
 
@@ -466,19 +485,21 @@ import java.util.regex.Pattern;
   }
 
   private static Pair<TrackGroupArray, TrackGroupInfo[]> buildTrackGroups(
-      List<AdaptationSet> adaptationSets, List<EventStream> eventStreams) {
+      DrmSessionManager drmSessionManager,
+      List<AdaptationSet> adaptationSets,
+      List<EventStream> eventStreams) {
     int[][] groupedAdaptationSetIndices = getGroupedAdaptationSetIndices(adaptationSets);
 
     int primaryGroupCount = groupedAdaptationSetIndices.length;
     boolean[] primaryGroupHasEventMessageTrackFlags = new boolean[primaryGroupCount];
-    Format[][] primaryGroupCea608TrackFormats = new Format[primaryGroupCount][];
+    Format[][] primaryGroupClosedCaptionTrackFormats = new Format[primaryGroupCount][];
     int totalEmbeddedTrackGroupCount =
         identifyEmbeddedTracks(
             primaryGroupCount,
             adaptationSets,
             groupedAdaptationSetIndices,
             primaryGroupHasEventMessageTrackFlags,
-            primaryGroupCea608TrackFormats);
+            primaryGroupClosedCaptionTrackFormats);
 
     int totalGroupCount = primaryGroupCount + totalEmbeddedTrackGroupCount + eventStreams.size();
     TrackGroup[] trackGroups = new TrackGroup[totalGroupCount];
@@ -486,11 +507,12 @@ import java.util.regex.Pattern;
 
     int trackGroupCount =
         buildPrimaryAndEmbeddedTrackGroupInfos(
+            drmSessionManager,
             adaptationSets,
             groupedAdaptationSetIndices,
             primaryGroupCount,
             primaryGroupHasEventMessageTrackFlags,
-            primaryGroupCea608TrackFormats,
+            primaryGroupClosedCaptionTrackFormats,
             trackGroups,
             trackGroupInfos);
 
@@ -499,51 +521,94 @@ import java.util.regex.Pattern;
     return Pair.create(new TrackGroupArray(trackGroups), trackGroupInfos);
   }
 
+  /**
+   * Groups adaptation sets. Two adaptations sets belong to the same group if either:
+   *
+   * <ul>
+   *   <li>One is a trick-play adaptation set and uses a {@code
+   *       http://dashif.org/guidelines/trickmode} essential or supplemental property to indicate
+   *       that the other is the main adaptation set to which it corresponds.
+   *   <li>The two adaptation sets are marked as safe for switching using {@code
+   *       urn:mpeg:dash:adaptation-set-switching:2016} supplemental properties.
+   * </ul>
+   *
+   * @param adaptationSets The adaptation sets to merge.
+   * @return An array of groups, where each group is an array of adaptation set indices.
+   */
   private static int[][] getGroupedAdaptationSetIndices(List<AdaptationSet> adaptationSets) {
     int adaptationSetCount = adaptationSets.size();
-    SparseIntArray idToIndexMap = new SparseIntArray(adaptationSetCount);
+    SparseIntArray adaptationSetIdToIndex = new SparseIntArray(adaptationSetCount);
+    List<List<Integer>> adaptationSetGroupedIndices = new ArrayList<>(adaptationSetCount);
+    SparseArray<List<Integer>> adaptationSetIndexToGroupedIndices =
+        new SparseArray<>(adaptationSetCount);
+
+    // Initially make each adaptation set belong to its own group. Also build the
+    // adaptationSetIdToIndex map.
     for (int i = 0; i < adaptationSetCount; i++) {
-      idToIndexMap.put(adaptationSets.get(i).id, i);
+      adaptationSetIdToIndex.put(adaptationSets.get(i).id, i);
+      List<Integer> initialGroup = new ArrayList<>();
+      initialGroup.add(i);
+      adaptationSetGroupedIndices.add(initialGroup);
+      adaptationSetIndexToGroupedIndices.put(i, initialGroup);
     }
 
-    int[][] groupedAdaptationSetIndices = new int[adaptationSetCount][];
-    boolean[] adaptationSetUsedFlags = new boolean[adaptationSetCount];
-
-    int groupCount = 0;
+    // Merge adaptation set groups.
     for (int i = 0; i < adaptationSetCount; i++) {
-      if (adaptationSetUsedFlags[i]) {
-        // This adaptation set has already been included in a group.
-        continue;
+      int mergedGroupIndex = i;
+      AdaptationSet adaptationSet = adaptationSets.get(i);
+
+      // Trick-play adaptation sets are merged with their corresponding main adaptation sets.
+      @Nullable
+      Descriptor trickPlayProperty = findTrickPlayProperty(adaptationSet.essentialProperties);
+      if (trickPlayProperty == null) {
+        // Trick-play can also be specified using a supplemental property.
+        trickPlayProperty = findTrickPlayProperty(adaptationSet.supplementalProperties);
       }
-      adaptationSetUsedFlags[i] = true;
-      Descriptor adaptationSetSwitchingProperty = findAdaptationSetSwitchingProperty(
-          adaptationSets.get(i).supplementalProperties);
-      if (adaptationSetSwitchingProperty == null) {
-        groupedAdaptationSetIndices[groupCount++] = new int[] {i};
-      } else {
-        String[] extraAdaptationSetIds = Util.split(adaptationSetSwitchingProperty.value, ",");
-        int[] adaptationSetIndices = new int[1 + extraAdaptationSetIds.length];
-        adaptationSetIndices[0] = i;
-        int outputIndex = 1;
-        for (int j = 0; j < extraAdaptationSetIds.length; j++) {
-          int extraIndex =
-              idToIndexMap.get(
-                  Integer.parseInt(extraAdaptationSetIds[j]), /* valueIfKeyNotFound= */ -1);
-          if (extraIndex != -1) {
-            adaptationSetUsedFlags[extraIndex] = true;
-            adaptationSetIndices[outputIndex] = extraIndex;
-            outputIndex++;
+      if (trickPlayProperty != null) {
+        int mainAdaptationSetId = Integer.parseInt(trickPlayProperty.value);
+        int mainAdaptationSetIndex =
+            adaptationSetIdToIndex.get(mainAdaptationSetId, /* valueIfKeyNotFound= */ -1);
+        if (mainAdaptationSetIndex != -1) {
+          mergedGroupIndex = mainAdaptationSetIndex;
+        }
+      }
+
+      // Adaptation sets that are safe for switching are merged, using the smallest index for the
+      // merged group.
+      if (mergedGroupIndex == i) {
+        @Nullable
+        Descriptor adaptationSetSwitchingProperty =
+            findAdaptationSetSwitchingProperty(adaptationSet.supplementalProperties);
+        if (adaptationSetSwitchingProperty != null) {
+          String[] otherAdaptationSetIds = Util.split(adaptationSetSwitchingProperty.value, ",");
+          for (String adaptationSetId : otherAdaptationSetIds) {
+            int otherAdaptationSetId =
+                adaptationSetIdToIndex.get(
+                    Integer.parseInt(adaptationSetId), /* valueIfKeyNotFound= */ -1);
+            if (otherAdaptationSetId != -1) {
+              mergedGroupIndex = min(mergedGroupIndex, otherAdaptationSetId);
+            }
           }
         }
-        if (outputIndex < adaptationSetIndices.length) {
-          adaptationSetIndices = Arrays.copyOf(adaptationSetIndices, outputIndex);
-        }
-        groupedAdaptationSetIndices[groupCount++] = adaptationSetIndices;
+      }
+
+      // Merge the groups if necessary.
+      if (mergedGroupIndex != i) {
+        List<Integer> thisGroup = adaptationSetIndexToGroupedIndices.get(i);
+        List<Integer> mergedGroup = adaptationSetIndexToGroupedIndices.get(mergedGroupIndex);
+        mergedGroup.addAll(thisGroup);
+        adaptationSetIndexToGroupedIndices.put(i, mergedGroup);
+        adaptationSetGroupedIndices.remove(thisGroup);
       }
     }
 
-    return groupCount < adaptationSetCount
-        ? Arrays.copyOf(groupedAdaptationSetIndices, groupCount) : groupedAdaptationSetIndices;
+    int[][] groupedAdaptationSetIndices = new int[adaptationSetGroupedIndices.size()][];
+    for (int i = 0; i < groupedAdaptationSetIndices.length; i++) {
+      groupedAdaptationSetIndices[i] = Ints.toArray(adaptationSetGroupedIndices.get(i));
+      // Restore the original adaptation set order within each group.
+      Arrays.sort(groupedAdaptationSetIndices[i]);
+    }
+    return groupedAdaptationSetIndices;
   }
 
   /**
@@ -555,8 +620,8 @@ import java.util.regex.Pattern;
    *     same primary group, grouped in primary track groups order.
    * @param primaryGroupHasEventMessageTrackFlags An output array to be filled with flags indicating
    *     whether each of the primary track groups contains an embedded event message track.
-   * @param primaryGroupCea608TrackFormats An output array to be filled with track formats for
-   *     CEA-608 tracks embedded in each of the primary track groups.
+   * @param primaryGroupClosedCaptionTrackFormats An output array to be filled with track formats
+   *     for closed caption tracks embedded in each of the primary track groups.
    * @return Total number of embedded track groups.
    */
   private static int identifyEmbeddedTracks(
@@ -564,16 +629,16 @@ import java.util.regex.Pattern;
       List<AdaptationSet> adaptationSets,
       int[][] groupedAdaptationSetIndices,
       boolean[] primaryGroupHasEventMessageTrackFlags,
-      Format[][] primaryGroupCea608TrackFormats) {
+      Format[][] primaryGroupClosedCaptionTrackFormats) {
     int numEmbeddedTrackGroups = 0;
     for (int i = 0; i < primaryGroupCount; i++) {
       if (hasEventMessageTrack(adaptationSets, groupedAdaptationSetIndices[i])) {
         primaryGroupHasEventMessageTrackFlags[i] = true;
         numEmbeddedTrackGroups++;
       }
-      primaryGroupCea608TrackFormats[i] =
-          getCea608TrackFormats(adaptationSets, groupedAdaptationSetIndices[i]);
-      if (primaryGroupCea608TrackFormats[i].length != 0) {
+      primaryGroupClosedCaptionTrackFormats[i] =
+          getClosedCaptionTrackFormats(adaptationSets, groupedAdaptationSetIndices[i]);
+      if (primaryGroupClosedCaptionTrackFormats[i].length != 0) {
         numEmbeddedTrackGroups++;
       }
     }
@@ -581,11 +646,12 @@ import java.util.regex.Pattern;
   }
 
   private static int buildPrimaryAndEmbeddedTrackGroupInfos(
+      DrmSessionManager drmSessionManager,
       List<AdaptationSet> adaptationSets,
       int[][] groupedAdaptationSetIndices,
       int primaryGroupCount,
       boolean[] primaryGroupHasEventMessageTrackFlags,
-      Format[][] primaryGroupCea608TrackFormats,
+      Format[][] primaryGroupClosedCaptionTrackFormats,
       TrackGroup[] trackGroups,
       TrackGroupInfo[] trackGroupInfos) {
     int trackGroupCount = 0;
@@ -597,15 +663,17 @@ import java.util.regex.Pattern;
       }
       Format[] formats = new Format[representations.size()];
       for (int j = 0; j < formats.length; j++) {
-        formats[j] = representations.get(j).format;
+        Format format = representations.get(j).format;
+        formats[j] =
+            format.copyWithExoMediaCryptoType(drmSessionManager.getExoMediaCryptoType(format));
       }
 
       AdaptationSet firstAdaptationSet = adaptationSets.get(adaptationSetIndices[0]);
       int primaryTrackGroupIndex = trackGroupCount++;
       int eventMessageTrackGroupIndex =
           primaryGroupHasEventMessageTrackFlags[i] ? trackGroupCount++ : C.INDEX_UNSET;
-      int cea608TrackGroupIndex =
-          primaryGroupCea608TrackFormats[i].length != 0 ? trackGroupCount++ : C.INDEX_UNSET;
+      int closedCaptionTrackGroupIndex =
+          primaryGroupClosedCaptionTrackFormats[i].length != 0 ? trackGroupCount++ : C.INDEX_UNSET;
 
       trackGroups[primaryTrackGroupIndex] = new TrackGroup(formats);
       trackGroupInfos[primaryTrackGroupIndex] =
@@ -614,18 +682,22 @@ import java.util.regex.Pattern;
               adaptationSetIndices,
               primaryTrackGroupIndex,
               eventMessageTrackGroupIndex,
-              cea608TrackGroupIndex);
+              closedCaptionTrackGroupIndex);
       if (eventMessageTrackGroupIndex != C.INDEX_UNSET) {
-        Format format = Format.createSampleFormat(firstAdaptationSet.id + ":emsg",
-            MimeTypes.APPLICATION_EMSG, null, Format.NO_VALUE, null);
+        Format format =
+            new Format.Builder()
+                .setId(firstAdaptationSet.id + ":emsg")
+                .setSampleMimeType(MimeTypes.APPLICATION_EMSG)
+                .build();
         trackGroups[eventMessageTrackGroupIndex] = new TrackGroup(format);
         trackGroupInfos[eventMessageTrackGroupIndex] =
             TrackGroupInfo.embeddedEmsgTrack(adaptationSetIndices, primaryTrackGroupIndex);
       }
-      if (cea608TrackGroupIndex != C.INDEX_UNSET) {
-        trackGroups[cea608TrackGroupIndex] = new TrackGroup(primaryGroupCea608TrackFormats[i]);
-        trackGroupInfos[cea608TrackGroupIndex] =
-            TrackGroupInfo.embeddedCea608Track(adaptationSetIndices, primaryTrackGroupIndex);
+      if (closedCaptionTrackGroupIndex != C.INDEX_UNSET) {
+        trackGroups[closedCaptionTrackGroupIndex] =
+            new TrackGroup(primaryGroupClosedCaptionTrackFormats[i]);
+        trackGroupInfos[closedCaptionTrackGroupIndex] =
+            TrackGroupInfo.embeddedClosedCaptionTrack(adaptationSetIndices, primaryTrackGroupIndex);
       }
     }
     return trackGroupCount;
@@ -635,8 +707,11 @@ import java.util.regex.Pattern;
       TrackGroup[] trackGroups, TrackGroupInfo[] trackGroupInfos, int existingTrackGroupCount) {
     for (int i = 0; i < eventStreams.size(); i++) {
       EventStream eventStream = eventStreams.get(i);
-      Format format = Format.createSampleFormat(eventStream.id(), MimeTypes.APPLICATION_EMSG, null,
-          Format.NO_VALUE, null);
+      Format format =
+          new Format.Builder()
+              .setId(eventStream.id())
+              .setSampleMimeType(MimeTypes.APPLICATION_EMSG)
+              .build();
       trackGroups[existingTrackGroupCount] = new TrackGroup(format);
       trackGroupInfos[existingTrackGroupCount++] = TrackGroupInfo.mpdEventTrack(i);
     }
@@ -653,11 +728,13 @@ import java.util.regex.Pattern;
           trackGroups.get(trackGroupInfo.embeddedEventMessageTrackGroupIndex);
       embeddedTrackCount++;
     }
-    boolean enableCea608Tracks = trackGroupInfo.embeddedCea608TrackGroupIndex != C.INDEX_UNSET;
-    TrackGroup embeddedCea608TrackGroup = null;
-    if (enableCea608Tracks) {
-      embeddedCea608TrackGroup = trackGroups.get(trackGroupInfo.embeddedCea608TrackGroupIndex);
-      embeddedTrackCount += embeddedCea608TrackGroup.length;
+    boolean enableClosedCaptionTrack =
+        trackGroupInfo.embeddedClosedCaptionTrackGroupIndex != C.INDEX_UNSET;
+    TrackGroup embeddedClosedCaptionTrackGroup = null;
+    if (enableClosedCaptionTrack) {
+      embeddedClosedCaptionTrackGroup =
+          trackGroups.get(trackGroupInfo.embeddedClosedCaptionTrackGroupIndex);
+      embeddedTrackCount += embeddedClosedCaptionTrackGroup.length;
     }
 
     Format[] embeddedTrackFormats = new Format[embeddedTrackCount];
@@ -668,12 +745,12 @@ import java.util.regex.Pattern;
       embeddedTrackTypes[embeddedTrackCount] = C.TRACK_TYPE_METADATA;
       embeddedTrackCount++;
     }
-    List<Format> embeddedCea608TrackFormats = new ArrayList<>();
-    if (enableCea608Tracks) {
-      for (int i = 0; i < embeddedCea608TrackGroup.length; i++) {
-        embeddedTrackFormats[embeddedTrackCount] = embeddedCea608TrackGroup.getFormat(i);
+    List<Format> embeddedClosedCaptionTrackFormats = new ArrayList<>();
+    if (enableClosedCaptionTrack) {
+      for (int i = 0; i < embeddedClosedCaptionTrackGroup.length; i++) {
+        embeddedTrackFormats[embeddedTrackCount] = embeddedClosedCaptionTrackGroup.getFormat(i);
         embeddedTrackTypes[embeddedTrackCount] = C.TRACK_TYPE_TEXT;
-        embeddedCea608TrackFormats.add(embeddedTrackFormats[embeddedTrackCount]);
+        embeddedClosedCaptionTrackFormats.add(embeddedTrackFormats[embeddedTrackCount]);
         embeddedTrackCount++;
       }
     }
@@ -692,7 +769,7 @@ import java.util.regex.Pattern;
             trackGroupInfo.trackType,
             elapsedRealtimeOffsetMs,
             enableEventMessageTrack,
-            embeddedCea608TrackFormats,
+            embeddedClosedCaptionTrackFormats,
             trackPlayerEmsgHandler,
             transferListener);
     ChunkSampleStream<DashChunkSource> stream =
@@ -704,8 +781,10 @@ import java.util.regex.Pattern;
             this,
             allocator,
             positionUs,
+            drmSessionManager,
+            drmEventDispatcher,
             loadErrorHandlingPolicy,
-            eventDispatcher);
+            mediaSourceEventDispatcher);
     synchronized (this) {
       // The map is also accessed on the loading thread so synchronize access.
       trackEmsgHandlerBySampleStream.put(stream, trackPlayerEmsgHandler);
@@ -713,10 +792,21 @@ import java.util.regex.Pattern;
     return stream;
   }
 
+  @Nullable
   private static Descriptor findAdaptationSetSwitchingProperty(List<Descriptor> descriptors) {
+    return findDescriptor(descriptors, "urn:mpeg:dash:adaptation-set-switching:2016");
+  }
+
+  @Nullable
+  private static Descriptor findTrickPlayProperty(List<Descriptor> descriptors) {
+    return findDescriptor(descriptors, "http://dashif.org/guidelines/trickmode");
+  }
+
+  @Nullable
+  private static Descriptor findDescriptor(List<Descriptor> descriptors, String schemeIdUri) {
     for (int i = 0; i < descriptors.size(); i++) {
       Descriptor descriptor = descriptors.get(i);
-      if ("urn:mpeg:dash:adaptation-set-switching:2016".equals(descriptor.schemeIdUri)) {
+      if (schemeIdUri.equals(descriptor.schemeIdUri)) {
         return descriptor;
       }
     }
@@ -737,7 +827,7 @@ import java.util.regex.Pattern;
     return false;
   }
 
-  private static Format[] getCea608TrackFormats(
+  private static Format[] getClosedCaptionTrackFormats(
       List<AdaptationSet> adaptationSets, int[] adaptationSetIndices) {
     for (int i : adaptationSetIndices) {
       AdaptationSet adaptationSet = adaptationSets.get(i);
@@ -745,55 +835,56 @@ import java.util.regex.Pattern;
       for (int j = 0; j < descriptors.size(); j++) {
         Descriptor descriptor = descriptors.get(j);
         if ("urn:scte:dash:cc:cea-608:2015".equals(descriptor.schemeIdUri)) {
-          String value = descriptor.value;
-          if (value == null) {
-            // There are embedded CEA-608 tracks, but service information is not declared.
-            return new Format[] {buildCea608TrackFormat(adaptationSet.id)};
-          }
-          String[] services = Util.split(value, ";");
-          Format[] formats = new Format[services.length];
-          for (int k = 0; k < services.length; k++) {
-            Matcher matcher = CEA608_SERVICE_DESCRIPTOR_REGEX.matcher(services[k]);
-            if (!matcher.matches()) {
-              // If we can't parse service information for all services, assume a single track.
-              return new Format[] {buildCea608TrackFormat(adaptationSet.id)};
-            }
-            formats[k] =
-                buildCea608TrackFormat(
-                    adaptationSet.id,
-                    /* language= */ matcher.group(2),
-                    /* accessibilityChannel= */ Integer.parseInt(matcher.group(1)));
-          }
-          return formats;
+          Format cea608Format =
+              new Format.Builder()
+                  .setSampleMimeType(MimeTypes.APPLICATION_CEA608)
+                  .setId(adaptationSet.id + ":cea608")
+                  .build();
+          return parseClosedCaptionDescriptor(
+              descriptor, CEA608_SERVICE_DESCRIPTOR_REGEX, cea608Format);
+        } else if ("urn:scte:dash:cc:cea-708:2015".equals(descriptor.schemeIdUri)) {
+          Format cea708Format =
+              new Format.Builder()
+                  .setSampleMimeType(MimeTypes.APPLICATION_CEA708)
+                  .setId(adaptationSet.id + ":cea708")
+                  .build();
+          return parseClosedCaptionDescriptor(
+              descriptor, CEA708_SERVICE_DESCRIPTOR_REGEX, cea708Format);
         }
       }
     }
     return new Format[0];
   }
 
-  private static Format buildCea608TrackFormat(int adaptationSetId) {
-    return buildCea608TrackFormat(
-        adaptationSetId, /* language= */ null, /* accessibilityChannel= */ Format.NO_VALUE);
+  private static Format[] parseClosedCaptionDescriptor(
+      Descriptor descriptor, Pattern serviceDescriptorRegex, Format baseFormat) {
+    @Nullable String value = descriptor.value;
+    if (value == null) {
+      // There are embedded closed caption tracks, but service information is not declared.
+      return new Format[] {baseFormat};
+    }
+    String[] services = Util.split(value, ";");
+    Format[] formats = new Format[services.length];
+    for (int i = 0; i < services.length; i++) {
+      Matcher matcher = serviceDescriptorRegex.matcher(services[i]);
+      if (!matcher.matches()) {
+        // If we can't parse service information for all services, assume a single track.
+        return new Format[] {baseFormat};
+      }
+      int accessibilityChannel = Integer.parseInt(matcher.group(1));
+      formats[i] =
+          baseFormat
+              .buildUpon()
+              .setId(baseFormat.id + ":" + accessibilityChannel)
+              .setAccessibilityChannel(accessibilityChannel)
+              .setLanguage(matcher.group(2))
+              .build();
+    }
+    return formats;
   }
 
-  private static Format buildCea608TrackFormat(
-      int adaptationSetId, String language, int accessibilityChannel) {
-    return Format.createTextSampleFormat(
-        adaptationSetId
-            + ":cea608"
-            + (accessibilityChannel != Format.NO_VALUE ? ":" + accessibilityChannel : ""),
-        MimeTypes.APPLICATION_CEA608,
-        /* codecs= */ null,
-        /* bitrate= */ Format.NO_VALUE,
-        /* selectionFlags= */ 0,
-        language,
-        accessibilityChannel,
-        /* drmInitData= */ null,
-        Format.OFFSET_SAMPLE_RELATIVE,
-        /* initializationData= */ null);
-  }
-
-  @SuppressWarnings("unchecked")
+  // We won't assign the array to a variable that erases the generic type, and then write into it.
+  @SuppressWarnings({"unchecked", "rawtypes"})
   private static ChunkSampleStream<DashChunkSource>[] newSampleStreamArray(int length) {
     return new ChunkSampleStream[length];
   }
@@ -831,21 +922,21 @@ import java.util.regex.Pattern;
     public final int eventStreamGroupIndex;
     public final int primaryTrackGroupIndex;
     public final int embeddedEventMessageTrackGroupIndex;
-    public final int embeddedCea608TrackGroupIndex;
+    public final int embeddedClosedCaptionTrackGroupIndex;
 
     public static TrackGroupInfo primaryTrack(
         int trackType,
         int[] adaptationSetIndices,
         int primaryTrackGroupIndex,
         int embeddedEventMessageTrackGroupIndex,
-        int embeddedCea608TrackGroupIndex) {
+        int embeddedClosedCaptionTrackGroupIndex) {
       return new TrackGroupInfo(
           trackType,
           CATEGORY_PRIMARY,
           adaptationSetIndices,
           primaryTrackGroupIndex,
           embeddedEventMessageTrackGroupIndex,
-          embeddedCea608TrackGroupIndex,
+          embeddedClosedCaptionTrackGroupIndex,
           /* eventStreamGroupIndex= */ -1);
     }
 
@@ -861,8 +952,8 @@ import java.util.regex.Pattern;
           /* eventStreamGroupIndex= */ -1);
     }
 
-    public static TrackGroupInfo embeddedCea608Track(int[] adaptationSetIndices,
-        int primaryTrackGroupIndex) {
+    public static TrackGroupInfo embeddedClosedCaptionTrack(
+        int[] adaptationSetIndices, int primaryTrackGroupIndex) {
       return new TrackGroupInfo(
           C.TRACK_TYPE_TEXT,
           CATEGORY_EMBEDDED,
@@ -890,14 +981,14 @@ import java.util.regex.Pattern;
         int[] adaptationSetIndices,
         int primaryTrackGroupIndex,
         int embeddedEventMessageTrackGroupIndex,
-        int embeddedCea608TrackGroupIndex,
+        int embeddedClosedCaptionTrackGroupIndex,
         int eventStreamGroupIndex) {
       this.trackType = trackType;
       this.adaptationSetIndices = adaptationSetIndices;
       this.trackGroupCategory = trackGroupCategory;
       this.primaryTrackGroupIndex = primaryTrackGroupIndex;
       this.embeddedEventMessageTrackGroupIndex = embeddedEventMessageTrackGroupIndex;
-      this.embeddedCea608TrackGroupIndex = embeddedCea608TrackGroupIndex;
+      this.embeddedClosedCaptionTrackGroupIndex = embeddedClosedCaptionTrackGroupIndex;
       this.eventStreamGroupIndex = eventStreamGroupIndex;
     }
   }

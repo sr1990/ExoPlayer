@@ -34,8 +34,9 @@
       android:banner="@drawable/ic_banner"
       android:largeHeap="true"
       android:allowBackup="false"
-      android:name="com.google.android.exoplayer2.demo.DemoApplication"
-      tools:ignore="UnusedAttribute">
+      android:requestLegacyExternalStorage="true"
+      android:name="androidx.multidex.MultiDexApplication"
+      tools:targetApi="29">
 
     <activity android:name="com.google.android.exoplayer2.demo.SampleChooserActivity"
         android:configChanges="keyboardHidden"

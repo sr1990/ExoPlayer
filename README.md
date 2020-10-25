@@ -1,4 +1,4 @@
-# ExoPlayer #
+# ExoPlayer <img src="https://img.shields.io/github/v/release/google/ExoPlayer.svg?label=latest"/> #
 
 ExoPlayer is an application level media player for Android. It provides an
 alternative to Android’s MediaPlayer API for playing audio and video both
@@ -107,6 +107,7 @@ branch:
 
 ```sh
 git clone https://github.com/google/ExoPlayer.git
+cd ExoPlayer
 git checkout release-v2
 ```
 

@@ -60,11 +60,14 @@ public interface SequenceableLoader {
    */
   boolean continueLoading(long positionUs);
 
+  /** Returns whether the loader is currently loading. */
+  boolean isLoading();
+
   /**
    * Re-evaluates the buffer given the playback position.
    *
-   * <p>Re-evaluation may discard buffered media so that it can be re-buffered in a different
-   * quality.
+   * <p>Re-evaluation may discard buffered media or cancel ongoing loads so that media can be
+   * re-buffered in a different quality.
    *
    * @param positionUs The current playback position in microseconds. If playback of this period has
    *     not yet started, the value will be the starting position in this period minus the duration

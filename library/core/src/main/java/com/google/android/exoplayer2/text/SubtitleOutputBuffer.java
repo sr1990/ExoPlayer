@@ -15,6 +15,7 @@
  */
 package com.google.android.exoplayer2.text;
 
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.decoder.OutputBuffer;
 import com.google.android.exoplayer2.util.Assertions;
@@ -25,7 +26,7 @@ import java.util.List;
  */
 public abstract class SubtitleOutputBuffer extends OutputBuffer implements Subtitle {
 
-  private Subtitle subtitle;
+  @Nullable private Subtitle subtitle;
   private long subsampleOffsetUs;
 
   /**
@@ -63,9 +64,6 @@ public abstract class SubtitleOutputBuffer extends OutputBuffer implements Subti
   public List<Cue> getCues(long timeUs) {
     return Assertions.checkNotNull(subtitle).getCues(timeUs - subsampleOffsetUs);
   }
-
-  @Override
-  public abstract void release();
 
   @Override
   public void clear() {

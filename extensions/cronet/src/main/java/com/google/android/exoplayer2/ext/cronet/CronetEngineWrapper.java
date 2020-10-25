@@ -15,8 +15,11 @@
  */
 package com.google.android.exoplayer2.ext.cronet;
 
+import static java.lang.Math.min;
+
 import android.content.Context;
 import androidx.annotation.IntDef;
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.Util;
 import java.lang.annotation.Documented;
@@ -37,8 +40,8 @@ public final class CronetEngineWrapper {
 
   private static final String TAG = "CronetEngineWrapper";
 
-  private final CronetEngine cronetEngine;
-  private final @CronetEngineSource int cronetEngineSource;
+  @Nullable private final CronetEngine cronetEngine;
+  @CronetEngineSource private final int cronetEngineSource;
 
   /**
    * Source of {@link CronetEngine}. One of {@link #SOURCE_NATIVE}, {@link #SOURCE_GMS}, {@link
@@ -144,7 +147,8 @@ public final class CronetEngineWrapper {
    *
    * @return A {@link CronetEngineSource} value.
    */
-  public @CronetEngineSource int getCronetEngineSource() {
+  @CronetEngineSource
+  public int getCronetEngineSource() {
     return cronetEngineSource;
   }
 
@@ -153,17 +157,19 @@ public final class CronetEngineWrapper {
    *
    * @return The CronetEngine, or null if no CronetEngine is available.
    */
+  @Nullable
   /* package */ CronetEngine getCronetEngine() {
     return cronetEngine;
   }
 
   private static class CronetProviderComparator implements Comparator<CronetProvider> {
 
-    private final String gmsCoreCronetName;
+    @Nullable private final String gmsCoreCronetName;
     private final boolean preferGMSCoreCronet;
 
     // Multi-catch can only be used for API 19+ in this case.
-    @SuppressWarnings("UseMultiCatch")
+    // Field#get(null) is blocked by the null-checker, but is safe because the field is static.
+    @SuppressWarnings({"UseMultiCatch", "nullness:argument.type.incompatible"})
     public CronetProviderComparator(boolean preferGMSCoreCronet) {
       // GMSCore CronetProvider classes are only available in some configurations.
       // Thus, we use reflection to copy static name.
@@ -226,7 +232,7 @@ public final class CronetEngineWrapper {
       }
       String[] versionStringsLeft = Util.split(versionLeft, "\\.");
       String[] versionStringsRight = Util.split(versionRight, "\\.");
-      int minLength = Math.min(versionStringsLeft.length, versionStringsRight.length);
+      int minLength = min(versionStringsLeft.length, versionStringsRight.length);
       for (int i = 0; i < minLength; i++) {
         if (!versionStringsLeft[i].equals(versionStringsRight[i])) {
           try {

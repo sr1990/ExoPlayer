@@ -55,6 +55,7 @@ public final class PriorityDataSource implements DataSource {
 
   @Override
   public void addTransferListener(TransferListener transferListener) {
+    Assertions.checkNotNull(transferListener);
     upstream.addTransferListener(transferListener);
   }
 
@@ -71,7 +72,8 @@ public final class PriorityDataSource implements DataSource {
   }
 
   @Override
-  public @Nullable Uri getUri() {
+  @Nullable
+  public Uri getUri() {
     return upstream.getUri();
   }
 

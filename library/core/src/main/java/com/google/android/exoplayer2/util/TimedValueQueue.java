@@ -62,6 +62,12 @@ public final class TimedValueQueue<V> {
     return size;
   }
 
+  /** Removes and returns the first value in the queue, or null if the queue is empty. */
+  @Nullable
+  public synchronized V pollFirst() {
+    return size == 0 ? null : popFirst();
+  }
+
   /**
    * Returns the value with the greatest timestamp which is less than or equal to the given
    * timestamp. Removes all older values and the returned one from the buffer.
@@ -71,7 +77,8 @@ public final class TimedValueQueue<V> {
    *     timestamp or null if there is no such value.
    * @see #poll(long)
    */
-  public synchronized @Nullable V pollFloor(long timestamp) {
+  @Nullable
+  public synchronized V pollFloor(long timestamp) {
     return poll(timestamp, /* onlyOlder= */ true);
   }
 
@@ -83,7 +90,8 @@ public final class TimedValueQueue<V> {
    * @return The value with the closest timestamp or null if the buffer is empty.
    * @see #pollFloor(long)
    */
-  public synchronized @Nullable V poll(long timestamp) {
+  @Nullable
+  public synchronized V poll(long timestamp) {
     return poll(timestamp, /* onlyOlder= */ false);
   }
 
@@ -97,8 +105,9 @@ public final class TimedValueQueue<V> {
    * @return The value with the closest timestamp or null if the buffer is empty or there is no
    *     older value and {@code onlyOlder} is true.
    */
-  private @Nullable V poll(long timestamp, boolean onlyOlder) {
-    V value = null;
+  @Nullable
+  private V poll(long timestamp, boolean onlyOlder) {
+    @Nullable V value = null;
     long previousTimeDiff = Long.MAX_VALUE;
     while (size > 0) {
       long timeDiff = timestamp - timestamps[first];
@@ -106,11 +115,18 @@ public final class TimedValueQueue<V> {
         break;
       }
       previousTimeDiff = timeDiff;
-      value = values[first];
-      values[first] = null;
-      first = (first + 1) % values.length;
-      size--;
+      value = popFirst();
     }
+    return value;
+  }
+
+  @Nullable
+  private V popFirst() {
+    Assertions.checkState(size > 0);
+    @Nullable V value = values[first];
+    values[first] = null;
+    first = (first + 1) % values.length;
+    size--;
     return value;
   }
 
@@ -130,7 +146,7 @@ public final class TimedValueQueue<V> {
     }
     int newCapacity = capacity * 2;
     long[] newTimestamps = new long[newCapacity];
-    V[] newValues = newArray(newCapacity);
+    @NullableType V[] newValues = newArray(newCapacity);
     // Reset the loop starting index to 0 while coping to the new buffer.
     // First copy the values from 'first' index to the end of original array.
     int length = capacity - first;
@@ -154,7 +170,7 @@ public final class TimedValueQueue<V> {
   }
 
   @SuppressWarnings("unchecked")
-  private static <V> V[] newArray(int length) {
+  private static <V> @NullableType V[] newArray(int length) {
     return (V[]) new Object[length];
   }
 }

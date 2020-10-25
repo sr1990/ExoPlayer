@@ -15,6 +15,8 @@
  */
 package com.google.android.exoplayer2.upstream;
 
+import static com.google.android.exoplayer2.ExoPlayerLibraryInfo.DEFAULT_USER_AGENT;
+
 import android.content.Context;
 import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.upstream.DataSource.Factory;
@@ -26,10 +28,21 @@ import com.google.android.exoplayer2.upstream.DataSource.Factory;
 public final class DefaultDataSourceFactory implements Factory {
 
   private final Context context;
-  private final @Nullable TransferListener listener;
+  @Nullable private final TransferListener listener;
   private final DataSource.Factory baseDataSourceFactory;
 
   /**
+   * Creates an instance.
+   *
+   * @param context A context.
+   */
+  public DefaultDataSourceFactory(Context context) {
+    this(context, DEFAULT_USER_AGENT, /* listener= */ null);
+  }
+
+  /**
+   * Creates an instance.
+   *
    * @param context A context.
    * @param userAgent The User-Agent string that should be used.
    */
@@ -38,6 +51,8 @@ public final class DefaultDataSourceFactory implements Factory {
   }
 
   /**
+   * Creates an instance.
+   *
    * @param context A context.
    * @param userAgent The User-Agent string that should be used.
    * @param listener An optional listener.
@@ -48,21 +63,25 @@ public final class DefaultDataSourceFactory implements Factory {
   }
 
   /**
+   * Creates an instance.
+   *
    * @param context A context.
    * @param baseDataSourceFactory A {@link Factory} to be used to create a base {@link DataSource}
    *     for {@link DefaultDataSource}.
-   * @see DefaultDataSource#DefaultDataSource(Context, TransferListener, DataSource)
+   * @see DefaultDataSource#DefaultDataSource(Context, DataSource)
    */
   public DefaultDataSourceFactory(Context context, DataSource.Factory baseDataSourceFactory) {
     this(context, /* listener= */ null, baseDataSourceFactory);
   }
 
   /**
+   * Creates an instance.
+   *
    * @param context A context.
    * @param listener An optional listener.
    * @param baseDataSourceFactory A {@link Factory} to be used to create a base {@link DataSource}
    *     for {@link DefaultDataSource}.
-   * @see DefaultDataSource#DefaultDataSource(Context, TransferListener, DataSource)
+   * @see DefaultDataSource#DefaultDataSource(Context, DataSource)
    */
   public DefaultDataSourceFactory(
       Context context,

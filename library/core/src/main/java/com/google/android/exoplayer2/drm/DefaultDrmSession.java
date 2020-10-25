@@ -15,23 +15,33 @@
  */
 package com.google.android.exoplayer2.drm;
 
+import static com.google.android.exoplayer2.util.Assertions.checkState;
+import static java.lang.Math.min;
+
 import android.annotation.SuppressLint;
-import android.annotation.TargetApi;
 import android.media.NotProvisionedException;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
-import androidx.annotation.Nullable;
+import android.os.SystemClock;
 import android.util.Pair;
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.drm.DrmInitData.SchemeData;
 import com.google.android.exoplayer2.drm.ExoMediaDrm.KeyRequest;
 import com.google.android.exoplayer2.drm.ExoMediaDrm.ProvisionRequest;
+import com.google.android.exoplayer2.source.LoadEventInfo;
+import com.google.android.exoplayer2.source.MediaLoadData;
+import com.google.android.exoplayer2.upstream.LoadErrorHandlingPolicy;
+import com.google.android.exoplayer2.upstream.LoadErrorHandlingPolicy.LoadErrorInfo;
 import com.google.android.exoplayer2.util.Assertions;
-import com.google.android.exoplayer2.util.EventDispatcher;
+import com.google.android.exoplayer2.util.Consumer;
+import com.google.android.exoplayer2.util.CopyOnWriteMultiset;
 import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.Util;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -42,26 +52,30 @@ import org.checkerframework.checker.nullness.qual.EnsuresNonNullIf;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
-/**
- * A {@link DrmSession} that supports playbacks using {@link ExoMediaDrm}.
- */
-@TargetApi(18)
-/* package */ class DefaultDrmSession<T extends ExoMediaCrypto> implements DrmSession<T> {
+/** A {@link DrmSession} that supports playbacks using {@link ExoMediaDrm}. */
+@RequiresApi(18)
+/* package */ class DefaultDrmSession implements DrmSession {
 
-  /**
-   * Manages provisioning requests.
-   */
-  public interface ProvisioningManager<T extends ExoMediaCrypto> {
+  /** Thrown when an unexpected exception or error is thrown during provisioning or key requests. */
+  public static final class UnexpectedDrmSessionException extends IOException {
+
+    public UnexpectedDrmSessionException(@Nullable Throwable cause) {
+      super(cause);
+    }
+  }
+
+  /** Manages provisioning requests. */
+  public interface ProvisioningManager {
 
     /**
-     * Called when a session requires provisioning. The manager <em>may</em> call
-     * {@link #provision()} to have this session perform the provisioning operation. The manager
+     * Called when a session requires provisioning. The manager <em>may</em> call {@link
+     * #provision()} to have this session perform the provisioning operation. The manager
      * <em>will</em> call {@link DefaultDrmSession#onProvisionCompleted()} when provisioning has
      * completed, or {@link DefaultDrmSession#onProvisionError} if provisioning fails.
      *
      * @param session The session.
      */
-    void provisionRequired(DefaultDrmSession<T> session);
+    void provisionRequired(DefaultDrmSession session);
 
     /**
      * Called by a session when it fails to perform a provisioning operation.
@@ -70,44 +84,66 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
      */
     void onProvisionError(Exception error);
 
-    /**
-     * Called by a session when it successfully completes a provisioning operation.
-     */
+    /** Called by a session when it successfully completes a provisioning operation. */
     void onProvisionCompleted();
+  }
 
+  /** Callback to be notified when the reference count of this session changes. */
+  public interface ReferenceCountListener {
+
+    /**
+     * Called when the internal reference count of this session is incremented.
+     *
+     * @param session This session.
+     * @param newReferenceCount The reference count after being incremented.
+     */
+    void onReferenceCountIncremented(DefaultDrmSession session, int newReferenceCount);
+
+    /**
+     * Called when the internal reference count of this session is decremented.
+     *
+     * <p>{@code newReferenceCount == 0} indicates this session is in {@link #STATE_RELEASED}.
+     *
+     * @param session This session.
+     * @param newReferenceCount The reference count after being decremented.
+     */
+    void onReferenceCountDecremented(DefaultDrmSession session, int newReferenceCount);
   }
 
   private static final String TAG = "DefaultDrmSession";
 
   private static final int MSG_PROVISION = 0;
   private static final int MSG_KEYS = 1;
-  private static final int MAX_LICENSE_DURATION_TO_RENEW = 60;
+  private static final int MAX_LICENSE_DURATION_TO_RENEW_SECONDS = 60;
 
   /** The DRM scheme datas, or null if this session uses offline keys. */
-  public final @Nullable List<SchemeData> schemeDatas;
+  @Nullable public final List<SchemeData> schemeDatas;
 
-  private final ExoMediaDrm<T> mediaDrm;
-  private final ProvisioningManager<T> provisioningManager;
+  private final ExoMediaDrm mediaDrm;
+  private final ProvisioningManager provisioningManager;
+  private final ReferenceCountListener referenceCountListener;
   private final @DefaultDrmSessionManager.Mode int mode;
-  private final @Nullable HashMap<String, String> optionalKeyRequestParameters;
-  private final EventDispatcher<DefaultDrmSessionEventListener> eventDispatcher;
-  private final int initialDrmRequestRetryCount;
+  private final boolean playClearSamplesWithoutKeys;
+  private final boolean isPlaceholderSession;
+  private final HashMap<String, String> keyRequestParameters;
+  private final CopyOnWriteMultiset<DrmSessionEventListener.EventDispatcher> eventDispatchers;
+  private final LoadErrorHandlingPolicy loadErrorHandlingPolicy;
 
   /* package */ final MediaDrmCallback callback;
   /* package */ final UUID uuid;
-  /* package */ final PostResponseHandler postResponseHandler;
+  /* package */ final ResponseHandler responseHandler;
 
   private @DrmSession.State int state;
-  private int openCount;
-  private HandlerThread requestHandlerThread;
-  private PostRequestHandler postRequestHandler;
-  private @Nullable T mediaCrypto;
-  private @Nullable DrmSessionException lastException;
-  private byte @MonotonicNonNull [] sessionId;
+  private int referenceCount;
+  @Nullable private HandlerThread requestHandlerThread;
+  @Nullable private RequestHandler requestHandler;
+  @Nullable private ExoMediaCrypto mediaCrypto;
+  @Nullable private DrmSessionException lastException;
+  @Nullable private byte[] sessionId;
   private byte @MonotonicNonNull [] offlineLicenseKeySetId;
 
-  private @Nullable KeyRequest currentKeyRequest;
-  private @Nullable ProvisionRequest currentProvisionRequest;
+  @Nullable private KeyRequest currentKeyRequest;
+  @Nullable private ProvisionRequest currentProvisionRequest;
 
   /**
    * Instantiates a new DRM session.
@@ -115,92 +151,56 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
    * @param uuid The UUID of the drm scheme.
    * @param mediaDrm The media DRM.
    * @param provisioningManager The manager for provisioning.
+   * @param referenceCountListener The {@link ReferenceCountListener}.
    * @param schemeDatas DRM scheme datas for this session, or null if an {@code
-   *     offlineLicenseKeySetId} is provided.
-   * @param mode The DRM mode.
+   *     offlineLicenseKeySetId} is provided or if {@code isPlaceholderSession} is true.
+   * @param mode The DRM mode. Ignored if {@code isPlaceholderSession} is true.
+   * @param isPlaceholderSession Whether this session is not expected to acquire any keys.
    * @param offlineLicenseKeySetId The offline license key set identifier, or null when not using
    *     offline keys.
-   * @param optionalKeyRequestParameters The optional key request parameters.
+   * @param keyRequestParameters Key request parameters.
    * @param callback The media DRM callback.
    * @param playbackLooper The playback looper.
-   * @param eventDispatcher The dispatcher for DRM session manager events.
-   * @param initialDrmRequestRetryCount The number of times to retry for initial provisioning and
-   *     key request before reporting error.
+   * @param loadErrorHandlingPolicy The {@link LoadErrorHandlingPolicy} for key and provisioning
+   *     requests.
    */
   public DefaultDrmSession(
       UUID uuid,
-      ExoMediaDrm<T> mediaDrm,
-      ProvisioningManager<T> provisioningManager,
+      ExoMediaDrm mediaDrm,
+      ProvisioningManager provisioningManager,
+      ReferenceCountListener referenceCountListener,
       @Nullable List<SchemeData> schemeDatas,
       @DefaultDrmSessionManager.Mode int mode,
+      boolean playClearSamplesWithoutKeys,
+      boolean isPlaceholderSession,
       @Nullable byte[] offlineLicenseKeySetId,
-      @Nullable HashMap<String, String> optionalKeyRequestParameters,
+      HashMap<String, String> keyRequestParameters,
       MediaDrmCallback callback,
       Looper playbackLooper,
-      EventDispatcher<DefaultDrmSessionEventListener> eventDispatcher,
-      int initialDrmRequestRetryCount) {
+      LoadErrorHandlingPolicy loadErrorHandlingPolicy) {
     if (mode == DefaultDrmSessionManager.MODE_QUERY
         || mode == DefaultDrmSessionManager.MODE_RELEASE) {
       Assertions.checkNotNull(offlineLicenseKeySetId);
     }
     this.uuid = uuid;
     this.provisioningManager = provisioningManager;
+    this.referenceCountListener = referenceCountListener;
     this.mediaDrm = mediaDrm;
     this.mode = mode;
+    this.playClearSamplesWithoutKeys = playClearSamplesWithoutKeys;
+    this.isPlaceholderSession = isPlaceholderSession;
     if (offlineLicenseKeySetId != null) {
       this.offlineLicenseKeySetId = offlineLicenseKeySetId;
       this.schemeDatas = null;
     } else {
       this.schemeDatas = Collections.unmodifiableList(Assertions.checkNotNull(schemeDatas));
     }
-    this.optionalKeyRequestParameters = optionalKeyRequestParameters;
+    this.keyRequestParameters = keyRequestParameters;
     this.callback = callback;
-    this.initialDrmRequestRetryCount = initialDrmRequestRetryCount;
-    this.eventDispatcher = eventDispatcher;
+    this.eventDispatchers = new CopyOnWriteMultiset<>();
+    this.loadErrorHandlingPolicy = loadErrorHandlingPolicy;
     state = STATE_OPENING;
-
-    postResponseHandler = new PostResponseHandler(playbackLooper);
-    requestHandlerThread = new HandlerThread("DrmRequestHandler");
-    requestHandlerThread.start();
-    postRequestHandler = new PostRequestHandler(requestHandlerThread.getLooper());
-  }
-
-  // Life cycle.
-
-  public void acquire() {
-    if (++openCount == 1) {
-      if (state == STATE_ERROR) {
-        return;
-      }
-      if (openInternal(true)) {
-        doLicense(true);
-      }
-    }
-  }
-
-  /** @return True if the session is closed and cleaned up, false otherwise. */
-  // Assigning null to various non-null variables for clean-up. Class won't be used after release.
-  @SuppressWarnings("assignment.type.incompatible")
-  public boolean release() {
-    if (--openCount == 0) {
-      state = STATE_RELEASED;
-      postResponseHandler.removeCallbacksAndMessages(null);
-      postRequestHandler.removeCallbacksAndMessages(null);
-      postRequestHandler = null;
-      requestHandlerThread.quit();
-      requestHandlerThread = null;
-      mediaCrypto = null;
-      lastException = null;
-      currentKeyRequest = null;
-      currentProvisionRequest = null;
-      if (sessionId != null) {
-        mediaDrm.closeSession(sessionId);
-        sessionId = null;
-        eventDispatcher.dispatch(DefaultDrmSessionEventListener::onDrmSessionReleased);
-      }
-      return true;
-    }
-    return false;
+    responseHandler = new ResponseHandler(playbackLooper);
   }
 
   public boolean hasSessionId(byte[] sessionId) {
@@ -221,7 +221,11 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
   public void provision() {
     currentProvisionRequest = mediaDrm.getProvisionRequest();
-    postRequestHandler.post(MSG_PROVISION, currentProvisionRequest, /* allowRetry= */ true);
+    Util.castNonNull(requestHandler)
+        .post(
+            MSG_PROVISION,
+            Assertions.checkNotNull(currentProvisionRequest),
+            /* allowRetry= */ true);
   }
 
   public void onProvisionCompleted() {
@@ -243,23 +247,85 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
   }
 
   @Override
+  public boolean playClearSamplesWithoutKeys() {
+    return playClearSamplesWithoutKeys;
+  }
+
+  @Override
   public final @Nullable DrmSessionException getError() {
     return state == STATE_ERROR ? lastException : null;
   }
 
   @Override
-  public final @Nullable T getMediaCrypto() {
+  public final @Nullable ExoMediaCrypto getMediaCrypto() {
     return mediaCrypto;
   }
 
   @Override
-  public @Nullable Map<String, String> queryKeyStatus() {
+  @Nullable
+  public Map<String, String> queryKeyStatus() {
     return sessionId == null ? null : mediaDrm.queryKeyStatus(sessionId);
   }
 
   @Override
-  public @Nullable byte[] getOfflineLicenseKeySetId() {
+  @Nullable
+  public byte[] getOfflineLicenseKeySetId() {
     return offlineLicenseKeySetId;
+  }
+
+  @Override
+  public void acquire(@Nullable DrmSessionEventListener.EventDispatcher eventDispatcher) {
+    checkState(referenceCount >= 0);
+    if (eventDispatcher != null) {
+      eventDispatchers.add(eventDispatcher);
+    }
+    if (++referenceCount == 1) {
+      checkState(state == STATE_OPENING);
+      requestHandlerThread = new HandlerThread("ExoPlayer:DrmRequestHandler");
+      requestHandlerThread.start();
+      requestHandler = new RequestHandler(requestHandlerThread.getLooper());
+      if (openInternal(true)) {
+        doLicense(true);
+      }
+    } else if (eventDispatcher != null && isOpen()) {
+      // If the session is already open then send the acquire event only to the provided dispatcher.
+      // TODO: Add a parameter to onDrmSessionAcquired to indicate whether the session is being
+      // re-used or not.
+      eventDispatcher.drmSessionAcquired();
+    }
+    referenceCountListener.onReferenceCountIncremented(this, referenceCount);
+  }
+
+  @Override
+  public void release(@Nullable DrmSessionEventListener.EventDispatcher eventDispatcher) {
+    checkState(referenceCount > 0);
+    if (--referenceCount == 0) {
+      // Assigning null to various non-null variables for clean-up.
+      state = STATE_RELEASED;
+      Util.castNonNull(responseHandler).removeCallbacksAndMessages(null);
+      Util.castNonNull(requestHandler).removeCallbacksAndMessages(null);
+      requestHandler = null;
+      Util.castNonNull(requestHandlerThread).quit();
+      requestHandlerThread = null;
+      mediaCrypto = null;
+      lastException = null;
+      currentKeyRequest = null;
+      currentProvisionRequest = null;
+      if (sessionId != null) {
+        mediaDrm.closeSession(sessionId);
+        sessionId = null;
+      }
+      dispatchEvent(DrmSessionEventListener.EventDispatcher::drmSessionReleased);
+    }
+    if (eventDispatcher != null) {
+      if (isOpen()) {
+        // If the session is still open then send the release event only to the provided dispatcher
+        // before removing it.
+        eventDispatcher.drmSessionReleased();
+      }
+      eventDispatchers.remove(eventDispatcher);
+    }
+    referenceCountListener.onReferenceCountDecremented(this, referenceCount);
   }
 
   // Internal methods.
@@ -280,9 +346,10 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
     try {
       sessionId = mediaDrm.openSession();
-      eventDispatcher.dispatch(DefaultDrmSessionEventListener::onDrmSessionAcquired);
       mediaCrypto = mediaDrm.createMediaCrypto(sessionId);
+      dispatchEvent(DrmSessionEventListener.EventDispatcher::drmSessionAcquired);
       state = STATE_OPENED;
+      Assertions.checkNotNull(sessionId);
       return true;
     } catch (NotProvisionedException e) {
       if (allowProvisioning) {
@@ -321,6 +388,10 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
   @RequiresNonNull("sessionId")
   private void doLicense(boolean allowRetry) {
+    if (isPlaceholderSession) {
+      return;
+    }
+    byte[] sessionId = Util.castNonNull(this.sessionId);
     switch (mode) {
       case DefaultDrmSessionManager.MODE_PLAYBACK:
       case DefaultDrmSessionManager.MODE_QUERY:
@@ -329,32 +400,31 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
         } else if (state == STATE_OPENED_WITH_KEYS || restoreKeys()) {
           long licenseDurationRemainingSec = getLicenseDurationRemainingSec();
           if (mode == DefaultDrmSessionManager.MODE_PLAYBACK
-              && licenseDurationRemainingSec <= MAX_LICENSE_DURATION_TO_RENEW) {
-            Log.d(TAG, "Offline license has expired or will expire soon. "
-                + "Remaining seconds: " + licenseDurationRemainingSec);
+              && licenseDurationRemainingSec <= MAX_LICENSE_DURATION_TO_RENEW_SECONDS) {
+            Log.d(
+                TAG,
+                "Offline license has expired or will expire soon. "
+                    + "Remaining seconds: "
+                    + licenseDurationRemainingSec);
             postKeyRequest(sessionId, ExoMediaDrm.KEY_TYPE_OFFLINE, allowRetry);
           } else if (licenseDurationRemainingSec <= 0) {
             onError(new KeysExpiredException());
           } else {
             state = STATE_OPENED_WITH_KEYS;
-            eventDispatcher.dispatch(DefaultDrmSessionEventListener::onDrmKeysRestored);
+            dispatchEvent(DrmSessionEventListener.EventDispatcher::drmKeysRestored);
           }
         }
         break;
       case DefaultDrmSessionManager.MODE_DOWNLOAD:
-        if (offlineLicenseKeySetId == null) {
+        if (offlineLicenseKeySetId == null || restoreKeys()) {
           postKeyRequest(sessionId, ExoMediaDrm.KEY_TYPE_OFFLINE, allowRetry);
-        } else {
-          // Renew
-          if (restoreKeys()) {
-            postKeyRequest(sessionId, ExoMediaDrm.KEY_TYPE_OFFLINE, allowRetry);
-          }
         }
         break;
       case DefaultDrmSessionManager.MODE_RELEASE:
         Assertions.checkNotNull(offlineLicenseKeySetId);
-        // It's not necessary to restore the key (and open a session to do that) before releasing it
-        // but this serves as a good sanity/fast-failure check.
+        Assertions.checkNotNull(this.sessionId);
+        // It's not necessary to restore the key before releasing it but this serves as a good
+        // fast-failure check.
         if (restoreKeys()) {
           postKeyRequest(offlineLicenseKeySetId, ExoMediaDrm.KEY_TYPE_RELEASE, allowRetry);
         }
@@ -370,7 +440,7 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
       mediaDrm.restoreKeys(sessionId, offlineLicenseKeySetId);
       return true;
     } catch (Exception e) {
-      Log.e(TAG, "Error trying to restore Widevine keys.", e);
+      Log.e(TAG, "Error trying to restore keys.", e);
       onError(e);
     }
     return false;
@@ -382,14 +452,14 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     }
     Pair<Long, Long> pair =
         Assertions.checkNotNull(WidevineUtil.getLicenseDurationRemainingSec(this));
-    return Math.min(pair.first, pair.second);
+    return min(pair.first, pair.second);
   }
 
   private void postKeyRequest(byte[] scope, int type, boolean allowRetry) {
     try {
-      currentKeyRequest =
-          mediaDrm.getKeyRequest(scope, schemeDatas, type, optionalKeyRequestParameters);
-      postRequestHandler.post(MSG_KEYS, currentKeyRequest, allowRetry);
+      currentKeyRequest = mediaDrm.getKeyRequest(scope, schemeDatas, type, keyRequestParameters);
+      Util.castNonNull(requestHandler)
+          .post(MSG_KEYS, Assertions.checkNotNull(currentKeyRequest), allowRetry);
     } catch (Exception e) {
       onKeysError(e);
     }
@@ -411,16 +481,18 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
       byte[] responseData = (byte[]) response;
       if (mode == DefaultDrmSessionManager.MODE_RELEASE) {
         mediaDrm.provideKeyResponse(Util.castNonNull(offlineLicenseKeySetId), responseData);
-        eventDispatcher.dispatch(DefaultDrmSessionEventListener::onDrmKeysRestored);
+        dispatchEvent(DrmSessionEventListener.EventDispatcher::drmKeysRemoved);
       } else {
         byte[] keySetId = mediaDrm.provideKeyResponse(sessionId, responseData);
         if ((mode == DefaultDrmSessionManager.MODE_DOWNLOAD
-            || (mode == DefaultDrmSessionManager.MODE_PLAYBACK && offlineLicenseKeySetId != null))
-            && keySetId != null && keySetId.length != 0) {
+                || (mode == DefaultDrmSessionManager.MODE_PLAYBACK
+                    && offlineLicenseKeySetId != null))
+            && keySetId != null
+            && keySetId.length != 0) {
           offlineLicenseKeySetId = keySetId;
         }
         state = STATE_OPENED_WITH_KEYS;
-        eventDispatcher.dispatch(DefaultDrmSessionEventListener::onDrmKeysLoaded);
+        dispatchEvent(DrmSessionEventListener.EventDispatcher::drmKeysLoaded);
       }
     } catch (Exception e) {
       onKeysError(e);
@@ -444,7 +516,7 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
   private void onError(final Exception e) {
     lastException = new DrmSessionException(e);
-    eventDispatcher.dispatch(listener -> listener.onDrmSessionManagerError(e));
+    dispatchEvent(eventDispatcher -> eventDispatcher.drmSessionManagerError(e));
     if (state != STATE_OPENED_WITH_KEYS) {
       state = STATE_ERROR;
     }
@@ -456,12 +528,18 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
     return state == STATE_OPENED || state == STATE_OPENED_WITH_KEYS;
   }
 
+  private void dispatchEvent(Consumer<DrmSessionEventListener.EventDispatcher> event) {
+    for (DrmSessionEventListener.EventDispatcher eventDispatcher : eventDispatchers.elementSet()) {
+      event.accept(eventDispatcher);
+    }
+  }
+
   // Internal classes.
 
   @SuppressLint("HandlerLeak")
-  private class PostResponseHandler extends Handler {
+  private class ResponseHandler extends Handler {
 
-    public PostResponseHandler(Looper looper) {
+    public ResponseHandler(Looper looper) {
       super(looper);
     }
 
@@ -480,68 +558,108 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
           break;
         default:
           break;
-
       }
     }
-
   }
 
   @SuppressLint("HandlerLeak")
-  private class PostRequestHandler extends Handler {
+  private class RequestHandler extends Handler {
 
-    public PostRequestHandler(Looper backgroundLooper) {
+    public RequestHandler(Looper backgroundLooper) {
       super(backgroundLooper);
     }
 
     void post(int what, Object request, boolean allowRetry) {
-      int allowRetryInt = allowRetry ? 1 : 0;
-      int errorCount = 0;
-      obtainMessage(what, allowRetryInt, errorCount, request).sendToTarget();
+      RequestTask requestTask =
+          new RequestTask(
+              LoadEventInfo.getNewId(),
+              allowRetry,
+              /* startTimeMs= */ SystemClock.elapsedRealtime(),
+              request);
+      obtainMessage(what, requestTask).sendToTarget();
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public void handleMessage(Message msg) {
-      Object request = msg.obj;
+      RequestTask requestTask = (RequestTask) msg.obj;
       Object response;
       try {
         switch (msg.what) {
           case MSG_PROVISION:
-            response = callback.executeProvisionRequest(uuid, (ProvisionRequest) request);
+            response =
+                callback.executeProvisionRequest(uuid, (ProvisionRequest) requestTask.request);
             break;
           case MSG_KEYS:
-            response = callback.executeKeyRequest(uuid, (KeyRequest) request);
+            response = callback.executeKeyRequest(uuid, (KeyRequest) requestTask.request);
             break;
           default:
             throw new RuntimeException();
         }
-      } catch (Exception e) {
-        if (maybeRetryRequest(msg)) {
+      } catch (MediaDrmCallbackException e) {
+        if (maybeRetryRequest(msg, e)) {
           return;
         }
         response = e;
+      } catch (Exception e) {
+        Log.w(TAG, "Key/provisioning request produced an unexpected exception. Not retrying.", e);
+        response = e;
       }
-      postResponseHandler.obtainMessage(msg.what, Pair.create(request, response)).sendToTarget();
+      loadErrorHandlingPolicy.onLoadTaskConcluded(requestTask.taskId);
+      responseHandler
+          .obtainMessage(msg.what, Pair.create(requestTask.request, response))
+          .sendToTarget();
     }
 
-    private boolean maybeRetryRequest(Message originalMsg) {
-      boolean allowRetry = originalMsg.arg1 == 1;
-      if (!allowRetry) {
+    private boolean maybeRetryRequest(Message originalMsg, MediaDrmCallbackException exception) {
+      RequestTask requestTask = (RequestTask) originalMsg.obj;
+      if (!requestTask.allowRetry) {
         return false;
       }
-      int errorCount = originalMsg.arg2 + 1;
-      if (errorCount > initialDrmRequestRetryCount) {
+      requestTask.errorCount++;
+      if (requestTask.errorCount
+          > loadErrorHandlingPolicy.getMinimumLoadableRetryCount(C.DATA_TYPE_DRM)) {
         return false;
       }
-      Message retryMsg = Message.obtain(originalMsg);
-      retryMsg.arg2 = errorCount;
-      sendMessageDelayed(retryMsg, getRetryDelayMillis(errorCount));
+      LoadEventInfo loadEventInfo =
+          new LoadEventInfo(
+              requestTask.taskId,
+              exception.dataSpec,
+              exception.uriAfterRedirects,
+              exception.responseHeaders,
+              SystemClock.elapsedRealtime(),
+              /* loadDurationMs= */ SystemClock.elapsedRealtime() - requestTask.startTimeMs,
+              exception.bytesLoaded);
+      MediaLoadData mediaLoadData = new MediaLoadData(C.DATA_TYPE_DRM);
+      IOException loadErrorCause =
+          exception.getCause() instanceof IOException
+              ? (IOException) exception.getCause()
+              : new UnexpectedDrmSessionException(exception.getCause());
+      long retryDelayMs =
+          loadErrorHandlingPolicy.getRetryDelayMsFor(
+              new LoadErrorInfo(
+                  loadEventInfo, mediaLoadData, loadErrorCause, requestTask.errorCount));
+      if (retryDelayMs == C.TIME_UNSET) {
+        // The error is fatal.
+        return false;
+      }
+      sendMessageDelayed(Message.obtain(originalMsg), retryDelayMs);
       return true;
     }
+  }
 
-    private long getRetryDelayMillis(int errorCount) {
-      return Math.min((errorCount - 1) * 1000, 5000);
+  private static final class RequestTask {
+
+    public final long taskId;
+    public final boolean allowRetry;
+    public final long startTimeMs;
+    public final Object request;
+    public int errorCount;
+
+    public RequestTask(long taskId, boolean allowRetry, long startTimeMs, Object request) {
+      this.taskId = taskId;
+      this.allowRetry = allowRetry;
+      this.startTimeMs = startTimeMs;
+      this.request = request;
     }
-
   }
 }

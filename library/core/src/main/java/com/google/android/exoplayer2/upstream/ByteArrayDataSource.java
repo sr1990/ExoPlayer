@@ -15,6 +15,8 @@
  */
 package com.google.android.exoplayer2.upstream;
 
+import static java.lang.Math.min;
+
 import android.net.Uri;
 import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
@@ -26,7 +28,7 @@ public final class ByteArrayDataSource extends BaseDataSource {
 
   private final byte[] data;
 
-  private @Nullable Uri uri;
+  @Nullable private Uri uri;
   private int readPosition;
   private int bytesRemaining;
   private boolean opened;
@@ -58,14 +60,14 @@ public final class ByteArrayDataSource extends BaseDataSource {
   }
 
   @Override
-  public int read(byte[] buffer, int offset, int readLength) throws IOException {
+  public int read(byte[] buffer, int offset, int readLength) {
     if (readLength == 0) {
       return 0;
     } else if (bytesRemaining == 0) {
       return C.RESULT_END_OF_INPUT;
     }
 
-    readLength = Math.min(readLength, bytesRemaining);
+    readLength = min(readLength, bytesRemaining);
     System.arraycopy(data, readPosition, buffer, offset, readLength);
     readPosition += readLength;
     bytesRemaining -= readLength;
@@ -74,12 +76,13 @@ public final class ByteArrayDataSource extends BaseDataSource {
   }
 
   @Override
-  public @Nullable Uri getUri() {
+  @Nullable
+  public Uri getUri() {
     return uri;
   }
 
   @Override
-  public void close() throws IOException {
+  public void close() {
     if (opened) {
       opened = false;
       transferEnded();

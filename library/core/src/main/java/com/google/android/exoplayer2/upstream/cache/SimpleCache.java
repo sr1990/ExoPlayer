@@ -16,8 +16,8 @@
 package com.google.android.exoplayer2.upstream.cache;
 
 import android.os.ConditionVariable;
-import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.WorkerThread;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.database.DatabaseIOException;
 import com.google.android.exoplayer2.database.DatabaseProvider;
@@ -61,9 +61,6 @@ public final class SimpleCache implements Cache {
 
   private static final HashSet<File> lockedCacheDirs = new HashSet<>();
 
-  private static boolean cacheFolderLockingDisabled;
-  private static boolean cacheInitializationExceptionsDisabled;
-
   private final File cacheDir;
   private final CacheEvictor evictor;
   private final CachedContentIndex contentIndex;
@@ -75,7 +72,7 @@ public final class SimpleCache implements Cache {
   private long uid;
   private long totalSpace;
   private boolean released;
-  @MonotonicNonNull private CacheException initializationException;
+  private @MonotonicNonNull CacheException initializationException;
 
   /**
    * Returns whether {@code cacheFolder} is locked by a {@link SimpleCache} instance. To unlock the
@@ -86,39 +83,15 @@ public final class SimpleCache implements Cache {
   }
 
   /**
-   * Disables locking the cache folders which {@link SimpleCache} instances are using and releases
-   * any previous lock.
-   *
-   * <p>The locking prevents multiple {@link SimpleCache} instances from being created for the same
-   * folder. Disabling it may cause the cache data to be corrupted. Use at your own risk.
-   *
-   * @deprecated Don't create multiple {@link SimpleCache} instances for the same cache folder. If
-   *     you need to create another instance, make sure you call {@link #release()} on the previous
-   *     instance.
-   */
-  @Deprecated
-  public static synchronized void disableCacheFolderLocking() {
-    cacheFolderLockingDisabled = true;
-    lockedCacheDirs.clear();
-  }
-
-  /**
-   * Disables throwing of cache initialization exceptions.
-   *
-   * @deprecated Don't use this. Provided for problematic upgrade cases only.
-   */
-  @Deprecated
-  public static void disableCacheInitializationExceptions() {
-    cacheInitializationExceptionsDisabled = true;
-  }
-
-  /**
    * Deletes all content belonging to a cache instance.
+   *
+   * <p>This method may be slow and shouldn't normally be called on the main thread.
    *
    * @param cacheDir The cache directory.
    * @param databaseProvider The database in which index data is stored, or {@code null} if the
    *     cache used a legacy index.
    */
+  @WorkerThread
   public static void delete(File cacheDir, @Nullable DatabaseProvider databaseProvider) {
     if (!cacheDir.exists()) {
       return;
@@ -161,6 +134,7 @@ public final class SimpleCache implements Cache {
    * @deprecated Use a constructor that takes a {@link DatabaseProvider} for improved performance.
    */
   @Deprecated
+  @SuppressWarnings("deprecation")
   public SimpleCache(File cacheDir, CacheEvictor evictor) {
     this(cacheDir, evictor, null, false);
   }
@@ -177,6 +151,7 @@ public final class SimpleCache implements Cache {
    * @deprecated Use a constructor that takes a {@link DatabaseProvider} for improved performance.
    */
   @Deprecated
+  @SuppressWarnings("deprecation")
   public SimpleCache(File cacheDir, CacheEvictor evictor, @Nullable byte[] secretKey) {
     this(cacheDir, evictor, secretKey, secretKey != null);
   }
@@ -285,7 +260,7 @@ public final class SimpleCache implements Cache {
 
     // Start cache initialization.
     final ConditionVariable conditionVariable = new ConditionVariable();
-    new Thread("SimpleCache.initialize()") {
+    new Thread("ExoPlayer:SimpleCacheInit") {
       @Override
       public void run() {
         synchronized (SimpleCache.this) {
@@ -304,7 +279,7 @@ public final class SimpleCache implements Cache {
    * @throws CacheException If an error occurred during initialization.
    */
   public synchronized void checkInitialization() throws CacheException {
-    if (!cacheInitializationExceptionsDisabled && initializationException != null) {
+    if (initializationException != null) {
       throw initializationException;
     }
   }
@@ -334,6 +309,8 @@ public final class SimpleCache implements Cache {
   @Override
   public synchronized NavigableSet<CacheSpan> addListener(String key, Listener listener) {
     Assertions.checkState(!released);
+    Assertions.checkNotNull(key);
+    Assertions.checkNotNull(listener);
     ArrayList<Listener> listenersForKey = listeners.get(key);
     if (listenersForKey == null) {
       listenersForKey = new ArrayList<>();
@@ -357,7 +334,6 @@ public final class SimpleCache implements Cache {
     }
   }
 
-  @NonNull
   @Override
   public synchronized NavigableSet<CacheSpan> getCachedSpans(String key) {
     Assertions.checkState(!released);
@@ -380,20 +356,21 @@ public final class SimpleCache implements Cache {
   }
 
   @Override
-  public synchronized SimpleCacheSpan startReadWrite(String key, long position)
+  public synchronized CacheSpan startReadWrite(String key, long position, long length)
       throws InterruptedException, CacheException {
     Assertions.checkState(!released);
     checkInitialization();
 
     while (true) {
-      SimpleCacheSpan span = startReadWriteNonBlocking(key, position);
+      CacheSpan span = startReadWriteNonBlocking(key, position, length);
       if (span != null) {
         return span;
       } else {
-        // Write case, lock not available. We'll be woken up when a locked span is released (if the
-        // released lock is for the requested key then we'll be able to make progress) or when a
-        // span is added to the cache (if the span is for the requested key and covers the requested
-        // position, then we'll become a read and be able to make progress).
+        // Lock not available. We'll be woken up when a span is added, or when a locked span is
+        // released. We'll be able to make progress when either:
+        // 1. A span is added for the requested key that covers the requested position, in which
+        //    case a read can be started.
+        // 2. The lock for the requested key is released, in which case a write can be started.
         wait();
       }
     }
@@ -401,47 +378,25 @@ public final class SimpleCache implements Cache {
 
   @Override
   @Nullable
-  public synchronized SimpleCacheSpan startReadWriteNonBlocking(String key, long position)
+  public synchronized CacheSpan startReadWriteNonBlocking(String key, long position, long length)
       throws CacheException {
     Assertions.checkState(!released);
     checkInitialization();
 
-    SimpleCacheSpan span = getSpan(key, position);
+    SimpleCacheSpan span = getSpan(key, position, length);
 
-    // Read case.
     if (span.isCached) {
-      if (!touchCacheSpans) {
-        return span;
-      }
-      String fileName = Assertions.checkNotNull(span.file).getName();
-      long length = span.length;
-      long lastTouchTimestamp = System.currentTimeMillis();
-      boolean updateFile = false;
-      if (fileIndex != null) {
-        try {
-          fileIndex.set(fileName, length, lastTouchTimestamp);
-        } catch (IOException e) {
-          Log.w(TAG, "Failed to update index with new touch timestamp.");
-        }
-      } else {
-        // Updating the file itself to incorporate the new last touch timestamp is much slower than
-        // updating the file index. Hence we only update the file if we don't have a file index.
-        updateFile = true;
-      }
-      SimpleCacheSpan newSpan =
-          contentIndex.get(key).setLastTouchTimestamp(span, lastTouchTimestamp, updateFile);
-      notifySpanTouched(span, newSpan);
-      return newSpan;
+      // Read case.
+      return touchSpan(key, span);
     }
 
     CachedContent cachedContent = contentIndex.getOrAdd(key);
-    if (!cachedContent.isLocked()) {
-      // Write case, lock available.
-      cachedContent.setLocked(true);
+    if (cachedContent.lockRange(position, span.length)) {
+      // Write case.
       return span;
     }
 
-    // Write case, lock not available.
+    // Lock not available.
     return null;
   }
 
@@ -452,7 +407,7 @@ public final class SimpleCache implements Cache {
 
     CachedContent cachedContent = contentIndex.get(key);
     Assertions.checkNotNull(cachedContent);
-    Assertions.checkState(cachedContent.isLocked());
+    Assertions.checkState(cachedContent.isFullyLocked(position, length));
     if (!cacheDir.exists()) {
       // For some reason the cache directory doesn't exist. Make a best effort to create it.
       cacheDir.mkdirs();
@@ -482,7 +437,7 @@ public final class SimpleCache implements Cache {
     SimpleCacheSpan span =
         Assertions.checkNotNull(SimpleCacheSpan.createCacheEntry(file, length, contentIndex));
     CachedContent cachedContent = Assertions.checkNotNull(contentIndex.get(span.key));
-    Assertions.checkState(cachedContent.isLocked());
+    Assertions.checkState(cachedContent.isFullyLocked(span.position, span.length));
 
     // Check if the span conflicts with the set content length
     long contentLength = ContentMetadata.getContentLength(cachedContent.getMetadata());
@@ -510,12 +465,18 @@ public final class SimpleCache implements Cache {
   @Override
   public synchronized void releaseHoleSpan(CacheSpan holeSpan) {
     Assertions.checkState(!released);
-    CachedContent cachedContent = contentIndex.get(holeSpan.key);
-    Assertions.checkNotNull(cachedContent);
-    Assertions.checkState(cachedContent.isLocked());
-    cachedContent.setLocked(false);
+    CachedContent cachedContent = Assertions.checkNotNull(contentIndex.get(holeSpan.key));
+    cachedContent.unlockRange(holeSpan.position);
     contentIndex.maybeRemove(cachedContent.key);
     notifyAll();
+  }
+
+  @Override
+  public synchronized void removeResource(String key) {
+    Assertions.checkState(!released);
+    for (CacheSpan span : getCachedSpans(key)) {
+      removeSpanInternal(span);
+    }
   }
 
   @Override
@@ -527,15 +488,41 @@ public final class SimpleCache implements Cache {
   @Override
   public synchronized boolean isCached(String key, long position, long length) {
     Assertions.checkState(!released);
-    CachedContent cachedContent = contentIndex.get(key);
+    @Nullable CachedContent cachedContent = contentIndex.get(key);
     return cachedContent != null && cachedContent.getCachedBytesLength(position, length) >= length;
   }
 
   @Override
   public synchronized long getCachedLength(String key, long position, long length) {
     Assertions.checkState(!released);
-    CachedContent cachedContent = contentIndex.get(key);
+    if (length == C.LENGTH_UNSET) {
+      length = Long.MAX_VALUE;
+    }
+    @Nullable CachedContent cachedContent = contentIndex.get(key);
     return cachedContent != null ? cachedContent.getCachedBytesLength(position, length) : -length;
+  }
+
+  @Override
+  public synchronized long getCachedBytes(String key, long position, long length) {
+    long endPosition = length == C.LENGTH_UNSET ? Long.MAX_VALUE : position + length;
+    if (endPosition < 0) {
+      // The calculation rolled over (length is probably Long.MAX_VALUE).
+      endPosition = Long.MAX_VALUE;
+    }
+    long currentPosition = position;
+    long cachedBytes = 0;
+    while (currentPosition < endPosition) {
+      long maxRemainingLength = endPosition - currentPosition;
+      long blockLength = getCachedLength(key, currentPosition, maxRemainingLength);
+      if (blockLength > 0) {
+        cachedBytes += blockLength;
+      } else {
+        // There's a hole of length -blockLength.
+        blockLength = -blockLength;
+      }
+      currentPosition += blockLength;
+    }
+    return cachedBytes;
   }
 
   @Override
@@ -558,36 +545,6 @@ public final class SimpleCache implements Cache {
     return contentIndex.getContentMetadata(key);
   }
 
-  /**
-   * Returns the cache {@link SimpleCacheSpan} corresponding to the provided lookup {@link
-   * SimpleCacheSpan}.
-   *
-   * <p>If the lookup position is contained by an existing entry in the cache, then the returned
-   * {@link SimpleCacheSpan} defines the file in which the data is stored. If the lookup position is
-   * not contained by an existing entry, then the returned {@link SimpleCacheSpan} defines the
-   * maximum extents of the hole in the cache.
-   *
-   * @param key The key of the span being requested.
-   * @param position The position of the span being requested.
-   * @return The corresponding cache {@link SimpleCacheSpan}.
-   */
-  private SimpleCacheSpan getSpan(String key, long position) {
-    CachedContent cachedContent = contentIndex.get(key);
-    if (cachedContent == null) {
-      return SimpleCacheSpan.createOpenHole(key, position);
-    }
-    while (true) {
-      SimpleCacheSpan span = cachedContent.getSpan(position);
-      if (span.isCached && !span.file.exists()) {
-        // The file has been deleted from under us. It's likely that other files will have been
-        // deleted too, so scan the whole in-memory representation.
-        removeStaleSpans();
-        continue;
-      }
-      return span;
-    }
-  }
-
   /** Ensures that the cache's in-memory representation has been initialized. */
   private void initialize() {
     if (!cacheDir.exists()) {
@@ -599,7 +556,7 @@ public final class SimpleCache implements Cache {
       }
     }
 
-    File[] files = cacheDir.listFiles();
+    @Nullable File[] files = cacheDir.listFiles();
     if (files == null) {
       String message = "Failed to list cache directory files: " + cacheDir;
       Log.e(TAG, message);
@@ -680,11 +637,13 @@ public final class SimpleCache implements Cache {
         }
         long length = C.LENGTH_UNSET;
         long lastTouchTimestamp = C.TIME_UNSET;
+        @Nullable
         CacheFileMetadata metadata = fileMetadata != null ? fileMetadata.remove(fileName) : null;
         if (metadata != null) {
           length = metadata.length;
           lastTouchTimestamp = metadata.lastTouchTimestamp;
         }
+        @Nullable
         SimpleCacheSpan span =
             SimpleCacheSpan.createCacheEntry(file, length, lastTouchTimestamp, contentIndex);
         if (span != null) {
@@ -693,6 +652,65 @@ public final class SimpleCache implements Cache {
           file.delete();
         }
       }
+    }
+  }
+
+  /**
+   * Touches a cache span, returning the updated result. If the evictor does not require cache spans
+   * to be touched, then this method does nothing and the span is returned without modification.
+   *
+   * @param key The key of the span being touched.
+   * @param span The span being touched.
+   * @return The updated span.
+   */
+  private SimpleCacheSpan touchSpan(String key, SimpleCacheSpan span) {
+    if (!touchCacheSpans) {
+      return span;
+    }
+    String fileName = Assertions.checkNotNull(span.file).getName();
+    long length = span.length;
+    long lastTouchTimestamp = System.currentTimeMillis();
+    boolean updateFile = false;
+    if (fileIndex != null) {
+      try {
+        fileIndex.set(fileName, length, lastTouchTimestamp);
+      } catch (IOException e) {
+        Log.w(TAG, "Failed to update index with new touch timestamp.");
+      }
+    } else {
+      // Updating the file itself to incorporate the new last touch timestamp is much slower than
+      // updating the file index. Hence we only update the file if we don't have a file index.
+      updateFile = true;
+    }
+    SimpleCacheSpan newSpan =
+        contentIndex.get(key).setLastTouchTimestamp(span, lastTouchTimestamp, updateFile);
+    notifySpanTouched(span, newSpan);
+    return newSpan;
+  }
+
+  /**
+   * Returns the cache span corresponding to the provided key and range. See {@link
+   * Cache#startReadWrite(String, long, long)} for detailed descriptions of the returned spans.
+   *
+   * @param key The key of the span being requested.
+   * @param position The position of the span being requested.
+   * @param length The length of the span, or {@link C#LENGTH_UNSET} if unbounded.
+   * @return The corresponding cache {@link SimpleCacheSpan}.
+   */
+  private SimpleCacheSpan getSpan(String key, long position, long length) {
+    @Nullable CachedContent cachedContent = contentIndex.get(key);
+    if (cachedContent == null) {
+      return SimpleCacheSpan.createHole(key, position, length);
+    }
+    while (true) {
+      SimpleCacheSpan span = cachedContent.getSpan(position, length);
+      if (span.isCached && span.file.length() != span.length) {
+        // The file has been modified or deleted underneath us. It's likely that other files will
+        // have been modified too, so scan the whole in-memory representation.
+        removeStaleSpans();
+        continue;
+      }
+      return span;
     }
   }
 
@@ -708,7 +726,7 @@ public final class SimpleCache implements Cache {
   }
 
   private void removeSpanInternal(CacheSpan span) {
-    CachedContent cachedContent = contentIndex.get(span.key);
+    @Nullable CachedContent cachedContent = contentIndex.get(span.key);
     if (cachedContent == null || !cachedContent.removeSpan(span)) {
       return;
     }
@@ -728,14 +746,14 @@ public final class SimpleCache implements Cache {
   }
 
   /**
-   * Scans all of the cached spans in the in-memory representation, removing any for which files no
-   * longer exist.
+   * Scans all of the cached spans in the in-memory representation, removing any for which the
+   * underlying file lengths no longer match.
    */
   private void removeStaleSpans() {
     ArrayList<CacheSpan> spansToBeRemoved = new ArrayList<>();
     for (CachedContent cachedContent : contentIndex.getAll()) {
       for (CacheSpan span : cachedContent.getSpans()) {
-        if (!span.file.exists()) {
+        if (span.file.length() != span.length) {
           spansToBeRemoved.add(span);
         }
       }
@@ -746,7 +764,7 @@ public final class SimpleCache implements Cache {
   }
 
   private void notifySpanRemoved(CacheSpan span) {
-    ArrayList<Listener> keyListeners = listeners.get(span.key);
+    @Nullable ArrayList<Listener> keyListeners = listeners.get(span.key);
     if (keyListeners != null) {
       for (int i = keyListeners.size() - 1; i >= 0; i--) {
         keyListeners.get(i).onSpanRemoved(this, span);
@@ -756,7 +774,7 @@ public final class SimpleCache implements Cache {
   }
 
   private void notifySpanAdded(SimpleCacheSpan span) {
-    ArrayList<Listener> keyListeners = listeners.get(span.key);
+    @Nullable ArrayList<Listener> keyListeners = listeners.get(span.key);
     if (keyListeners != null) {
       for (int i = keyListeners.size() - 1; i >= 0; i--) {
         keyListeners.get(i).onSpanAdded(this, span);
@@ -766,7 +784,7 @@ public final class SimpleCache implements Cache {
   }
 
   private void notifySpanTouched(SimpleCacheSpan oldSpan, CacheSpan newSpan) {
-    ArrayList<Listener> keyListeners = listeners.get(oldSpan.key);
+    @Nullable ArrayList<Listener> keyListeners = listeners.get(oldSpan.key);
     if (keyListeners != null) {
       for (int i = keyListeners.size() - 1; i >= 0; i--) {
         keyListeners.get(i).onSpanTouched(this, oldSpan, newSpan);
@@ -780,7 +798,6 @@ public final class SimpleCache implements Cache {
    *
    * @param files The files belonging to the root directory.
    * @return The loaded UID, or {@link #UID_UNSET} if a UID has not yet been created.
-   * @throws IOException If there is an error loading or generating the UID.
    */
   private static long loadUid(File[] files) {
     for (File file : files) {
@@ -818,15 +835,10 @@ public final class SimpleCache implements Cache {
   }
 
   private static synchronized boolean lockFolder(File cacheDir) {
-    if (cacheFolderLockingDisabled) {
-      return true;
-    }
     return lockedCacheDirs.add(cacheDir.getAbsoluteFile());
   }
 
   private static synchronized void unlockFolder(File cacheDir) {
-    if (!cacheFolderLockingDisabled) {
-      lockedCacheDirs.remove(cacheDir.getAbsoluteFile());
-    }
+    lockedCacheDirs.remove(cacheDir.getAbsoluteFile());
   }
 }

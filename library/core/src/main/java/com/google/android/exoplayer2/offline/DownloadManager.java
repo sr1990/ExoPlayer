@@ -25,6 +25,7 @@ import static com.google.android.exoplayer2.offline.Download.STATE_REMOVING;
 import static com.google.android.exoplayer2.offline.Download.STATE_RESTARTING;
 import static com.google.android.exoplayer2.offline.Download.STATE_STOPPED;
 import static com.google.android.exoplayer2.offline.Download.STOP_REASON_NONE;
+import static java.lang.Math.min;
 
 import android.content.Context;
 import android.os.Handler;
@@ -40,6 +41,7 @@ import com.google.android.exoplayer2.scheduler.RequirementsWatcher;
 import com.google.android.exoplayer2.upstream.DataSource;
 import com.google.android.exoplayer2.upstream.DataSource.Factory;
 import com.google.android.exoplayer2.upstream.cache.Cache;
+import com.google.android.exoplayer2.upstream.cache.CacheDataSource;
 import com.google.android.exoplayer2.upstream.cache.CacheEvictor;
 import com.google.android.exoplayer2.upstream.cache.NoOpCacheEvictor;
 import com.google.android.exoplayer2.util.Assertions;
@@ -51,6 +53,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.Executor;
 
 /**
  * Manages downloads.
@@ -61,7 +64,9 @@ import java.util.concurrent.CopyOnWriteArraySet;
  *
  * <p>A download manager instance must be accessed only from the thread that created it, unless that
  * thread does not have a {@link Looper}. In that case, it must be accessed only from the
- * application's main thread. Registered listeners will be called on the same thread.
+ * application's main thread. Registered listeners will be called on the same thread. In all cases
+ * the `Looper` of the thread from which the manager must be accessed can be queried using {@link
+ * #getApplicationLooper()}.
  */
 public final class DownloadManager {
 
@@ -76,12 +81,25 @@ public final class DownloadManager {
     default void onInitialized(DownloadManager downloadManager) {}
 
     /**
+     * Called when downloads are ({@link #pauseDownloads() paused} or {@link #resumeDownloads()
+     * resumed}.
+     *
+     * @param downloadManager The reporting instance.
+     * @param downloadsPaused Whether downloads are currently paused.
+     */
+    default void onDownloadsPausedChanged(
+        DownloadManager downloadManager, boolean downloadsPaused) {}
+
+    /**
      * Called when the state of a download changes.
      *
      * @param downloadManager The reporting instance.
      * @param download The state of the download.
+     * @param finalException If the download is transitioning to {@link Download#STATE_FAILED}, this
+     *     is the final exception that resulted in the failure.
      */
-    default void onDownloadChanged(DownloadManager downloadManager, Download download) {}
+    default void onDownloadChanged(
+        DownloadManager downloadManager, Download download, @Nullable Exception finalException) {}
 
     /**
      * Called when a download is removed.
@@ -110,6 +128,19 @@ public final class DownloadManager {
         DownloadManager downloadManager,
         Requirements requirements,
         @Requirements.RequirementFlags int notMetRequirements) {}
+
+    /**
+     * Called when there is a change in whether this manager has one or more downloads that are not
+     * progressing for the sole reason that the {@link #getRequirements() Requirements} are not met.
+     * See {@link #isWaitingForRequirements()} for more information.
+     *
+     * @param downloadManager The reporting instance.
+     * @param waitingForRequirements Whether this manager has one or more downloads that are not
+     *     progressing for the sole reason that the {@link #getRequirements() Requirements} are not
+     *     met.
+     */
+    default void onWaitingForRequirementsChanged(
+        DownloadManager downloadManager, boolean waitingForRequirements) {}
   }
 
   /** The default maximum number of parallel downloads. */
@@ -143,7 +174,7 @@ public final class DownloadManager {
 
   private final Context context;
   private final WritableDownloadIndex downloadIndex;
-  private final Handler mainHandler;
+  private final Handler applicationHandler;
   private final InternalHandler internalHandler;
   private final RequirementsWatcher.Listener requirementsListener;
   private final CopyOnWriteArraySet<Listener> listeners;
@@ -155,6 +186,7 @@ public final class DownloadManager {
   private int maxParallelDownloads;
   private int minRetryCount;
   private int notMetRequirements;
+  private boolean waitingForRequirements;
   private List<Download> downloads;
   private RequirementsWatcher requirementsWatcher;
 
@@ -167,13 +199,42 @@ public final class DownloadManager {
    *     an {@link CacheEvictor} that will not evict downloaded content, for example {@link
    *     NoOpCacheEvictor}.
    * @param upstreamFactory A {@link Factory} for creating {@link DataSource}s for downloading data.
+   * @deprecated Use {@link #DownloadManager(Context, DatabaseProvider, Cache, Factory, Executor)}.
    */
+  @Deprecated
   public DownloadManager(
       Context context, DatabaseProvider databaseProvider, Cache cache, Factory upstreamFactory) {
+    this(context, databaseProvider, cache, upstreamFactory, Runnable::run);
+  }
+
+  /**
+   * Constructs a {@link DownloadManager}.
+   *
+   * @param context Any context.
+   * @param databaseProvider Provides the SQLite database in which downloads are persisted.
+   * @param cache A cache to be used to store downloaded data. The cache should be configured with
+   *     an {@link CacheEvictor} that will not evict downloaded content, for example {@link
+   *     NoOpCacheEvictor}.
+   * @param upstreamFactory A {@link Factory} for creating {@link DataSource}s for downloading data.
+   * @param executor An {@link Executor} used to download data. Passing {@code Runnable::run} will
+   *     cause each download task to download data on its own thread. Passing an {@link Executor}
+   *     that uses multiple threads will speed up download tasks that can be split into smaller
+   *     parts for parallel execution.
+   */
+  public DownloadManager(
+      Context context,
+      DatabaseProvider databaseProvider,
+      Cache cache,
+      Factory upstreamFactory,
+      Executor executor) {
     this(
         context,
         new DefaultDownloadIndex(databaseProvider),
-        new DefaultDownloaderFactory(new DownloaderConstructorHelper(cache, upstreamFactory)));
+        new DefaultDownloaderFactory(
+            new CacheDataSource.Factory()
+                .setCache(cache)
+                .setUpstreamDataSourceFactory(upstreamFactory),
+            executor));
   }
 
   /**
@@ -195,9 +256,9 @@ public final class DownloadManager {
     listeners = new CopyOnWriteArraySet<>();
 
     @SuppressWarnings("methodref.receiver.bound.invalid")
-    Handler mainHandler = Util.createHandler(this::handleMainMessage);
-    this.mainHandler = mainHandler;
-    HandlerThread internalThread = new HandlerThread("DownloadManager file i/o");
+    Handler mainHandler = Util.createHandlerForCurrentOrMainLooper(this::handleMainMessage);
+    this.applicationHandler = mainHandler;
+    HandlerThread internalThread = new HandlerThread("ExoPlayer:DownloadManager");
     internalThread.start();
     internalHandler =
         new InternalHandler(
@@ -222,6 +283,14 @@ public final class DownloadManager {
         .sendToTarget();
   }
 
+  /**
+   * Returns the {@link Looper} associated with the application thread that's used to access the
+   * manager, and on which the manager will call its {@link Listener Listeners}.
+   */
+  public Looper getApplicationLooper() {
+    return applicationHandler.getLooper();
+  }
+
   /** Returns whether the manager has completed initialization. */
   public boolean isInitialized() {
     return initialized;
@@ -238,17 +307,16 @@ public final class DownloadManager {
 
   /**
    * Returns whether this manager has one or more downloads that are not progressing for the sole
-   * reason that the {@link #getRequirements() Requirements} are not met.
+   * reason that the {@link #getRequirements() Requirements} are not met. This is true if:
+   *
+   * <ul>
+   *   <li>The {@link #getRequirements() Requirements} are not met.
+   *   <li>The downloads are not paused (i.e. {@link #getDownloadsPaused()} is {@code false}).
+   *   <li>There are downloads in the {@link Download#STATE_QUEUED queued state}.
+   * </ul>
    */
   public boolean isWaitingForRequirements() {
-    if (!downloadsPaused && notMetRequirements != 0) {
-      for (int i = 0; i < downloads.size(); i++) {
-        if (downloads.get(i).state == STATE_QUEUED) {
-          return true;
-        }
-      }
-    }
-    return false;
+    return waitingForRequirements;
   }
 
   /**
@@ -257,6 +325,7 @@ public final class DownloadManager {
    * @param listener The listener to be added.
    */
   public void addListener(Listener listener) {
+    Assertions.checkNotNull(listener);
     listeners.add(listener);
   }
 
@@ -281,7 +350,7 @@ public final class DownloadManager {
    */
   @Requirements.RequirementFlags
   public int getNotMetRequirements() {
-    return getRequirements().getNotMetRequirements(context);
+    return notMetRequirements;
   }
 
   /**
@@ -374,29 +443,15 @@ public final class DownloadManager {
    * {@link Download#stopReason stopReasons}.
    */
   public void resumeDownloads() {
-    if (!downloadsPaused) {
-      return;
-    }
-    downloadsPaused = false;
-    pendingMessages++;
-    internalHandler
-        .obtainMessage(MSG_SET_DOWNLOADS_PAUSED, /* downloadsPaused */ 0, /* unused */ 0)
-        .sendToTarget();
+    setDownloadsPaused(/* downloadsPaused= */ false);
   }
 
   /**
-   * Pauses downloads. Downloads that would otherwise be making progress transition to {@link
+   * Pauses downloads. Downloads that would otherwise be making progress will transition to {@link
    * Download#STATE_QUEUED}.
    */
   public void pauseDownloads() {
-    if (downloadsPaused) {
-      return;
-    }
-    downloadsPaused = true;
-    pendingMessages++;
-    internalHandler
-        .obtainMessage(MSG_SET_DOWNLOADS_PAUSED, /* downloadsPaused */ 1, /* unused */ 0)
-        .sendToTarget();
+    setDownloadsPaused(/* downloadsPaused= */ true);
   }
 
   /**
@@ -475,12 +530,32 @@ public final class DownloadManager {
         // Restore the interrupted status.
         Thread.currentThread().interrupt();
       }
-      mainHandler.removeCallbacksAndMessages(/* token= */ null);
+      applicationHandler.removeCallbacksAndMessages(/* token= */ null);
       // Reset state.
       downloads = Collections.emptyList();
       pendingMessages = 0;
       activeTaskCount = 0;
       initialized = false;
+      notMetRequirements = 0;
+      waitingForRequirements = false;
+    }
+  }
+
+  private void setDownloadsPaused(boolean downloadsPaused) {
+    if (this.downloadsPaused == downloadsPaused) {
+      return;
+    }
+    this.downloadsPaused = downloadsPaused;
+    pendingMessages++;
+    internalHandler
+        .obtainMessage(MSG_SET_DOWNLOADS_PAUSED, downloadsPaused ? 1 : 0, /* unused */ 0)
+        .sendToTarget();
+    boolean waitingForRequirementsChanged = updateWaitingForRequirements();
+    for (Listener listener : listeners) {
+      listener.onDownloadsPausedChanged(this, downloadsPaused);
+    }
+    if (waitingForRequirementsChanged) {
+      notifyWaitingForRequirementsChanged();
     }
   }
 
@@ -488,17 +563,41 @@ public final class DownloadManager {
       RequirementsWatcher requirementsWatcher,
       @Requirements.RequirementFlags int notMetRequirements) {
     Requirements requirements = requirementsWatcher.getRequirements();
+    if (this.notMetRequirements != notMetRequirements) {
+      this.notMetRequirements = notMetRequirements;
+      pendingMessages++;
+      internalHandler
+          .obtainMessage(MSG_SET_NOT_MET_REQUIREMENTS, notMetRequirements, /* unused */ 0)
+          .sendToTarget();
+    }
+    boolean waitingForRequirementsChanged = updateWaitingForRequirements();
     for (Listener listener : listeners) {
       listener.onRequirementsStateChanged(this, requirements, notMetRequirements);
     }
-    if (this.notMetRequirements == notMetRequirements) {
-      return;
+    if (waitingForRequirementsChanged) {
+      notifyWaitingForRequirementsChanged();
     }
-    this.notMetRequirements = notMetRequirements;
-    pendingMessages++;
-    internalHandler
-        .obtainMessage(MSG_SET_NOT_MET_REQUIREMENTS, notMetRequirements, /* unused */ 0)
-        .sendToTarget();
+  }
+
+  private boolean updateWaitingForRequirements() {
+    boolean waitingForRequirements = false;
+    if (!downloadsPaused && notMetRequirements != 0) {
+      for (int i = 0; i < downloads.size(); i++) {
+        if (downloads.get(i).state == STATE_QUEUED) {
+          waitingForRequirements = true;
+          break;
+        }
+      }
+    }
+    boolean waitingForRequirementsChanged = this.waitingForRequirements != waitingForRequirements;
+    this.waitingForRequirements = waitingForRequirements;
+    return waitingForRequirementsChanged;
+  }
+
+  private void notifyWaitingForRequirementsChanged() {
+    for (Listener listener : listeners) {
+      listener.onWaitingForRequirementsChanged(this, waitingForRequirements);
+    }
   }
 
   // Main thread message handling.
@@ -528,22 +627,30 @@ public final class DownloadManager {
   private void onInitialized(List<Download> downloads) {
     initialized = true;
     this.downloads = Collections.unmodifiableList(downloads);
+    boolean waitingForRequirementsChanged = updateWaitingForRequirements();
     for (Listener listener : listeners) {
       listener.onInitialized(DownloadManager.this);
+    }
+    if (waitingForRequirementsChanged) {
+      notifyWaitingForRequirementsChanged();
     }
   }
 
   private void onDownloadUpdate(DownloadUpdate update) {
     downloads = Collections.unmodifiableList(update.downloads);
     Download updatedDownload = update.download;
+    boolean waitingForRequirementsChanged = updateWaitingForRequirements();
     if (update.isRemove) {
       for (Listener listener : listeners) {
         listener.onDownloadRemoved(this, updatedDownload);
       }
     } else {
       for (Listener listener : listeners) {
-        listener.onDownloadChanged(this, updatedDownload);
+        listener.onDownloadChanged(this, updatedDownload, update.finalException);
       }
+    }
+    if (waitingForRequirementsChanged) {
+      notifyWaitingForRequirementsChanged();
     }
   }
 
@@ -669,7 +776,7 @@ public final class DownloadManager {
           break;
         case MSG_CONTENT_LENGTH_CHANGED:
           task = (Task) message.obj;
-          onContentLengthChanged(task);
+          onContentLengthChanged(task, Util.toLong(message.arg1, message.arg2));
           return; // No need to post back to mainHandler.
         case MSG_UPDATE_PROGRESS:
           updateProgress();
@@ -731,7 +838,7 @@ public final class DownloadManager {
           Log.e(TAG, "Failed to set manual stop reason", e);
         }
       } else {
-        Download download = getDownload(id, /* loadFromIndex= */ false);
+        @Nullable Download download = getDownload(id, /* loadFromIndex= */ false);
         if (download != null) {
           setStopReason(download, stopReason);
         } else {
@@ -779,7 +886,7 @@ public final class DownloadManager {
     }
 
     private void addDownload(DownloadRequest request, int stopReason) {
-      Download download = getDownload(request.id, /* loadFromIndex= */ true);
+      @Nullable Download download = getDownload(request.id, /* loadFromIndex= */ true);
       long nowMs = System.currentTimeMillis();
       if (download != null) {
         putDownload(mergeRequest(download, request, stopReason, nowMs));
@@ -798,7 +905,7 @@ public final class DownloadManager {
     }
 
     private void removeDownload(String id) {
-      Download download = getDownload(id, /* loadFromIndex= */ true);
+      @Nullable Download download = getDownload(id, /* loadFromIndex= */ true);
       if (download == null) {
         Log.e(TAG, "Failed to remove nonexistent download: " + id);
         return;
@@ -831,7 +938,8 @@ public final class DownloadManager {
       ArrayList<Download> updateList = new ArrayList<>(downloads);
       for (int i = 0; i < downloads.size(); i++) {
         DownloadUpdate update =
-            new DownloadUpdate(downloads.get(i), /* isRemove= */ false, updateList);
+            new DownloadUpdate(
+                downloads.get(i), /* isRemove= */ false, updateList, /* finalException= */ null);
         mainHandler.obtainMessage(MSG_DOWNLOAD_UPDATE, update).sendToTarget();
       }
       syncTasks();
@@ -860,7 +968,7 @@ public final class DownloadManager {
       int accumulatingDownloadTaskCount = 0;
       for (int i = 0; i < downloads.size(); i++) {
         Download download = downloads.get(i);
-        Task activeTask = activeTasks.get(download.request.id);
+        @Nullable Task activeTask = activeTasks.get(download.request.id);
         switch (download.state) {
           case STATE_STOPPED:
             syncStoppedDownload(activeTask);
@@ -944,7 +1052,7 @@ public final class DownloadManager {
           // Cancel the downloading task.
           activeTask.cancel(/* released= */ false);
         }
-        // The activeTask is either a remove task, or a downloading task that we just cancelled. In
+        // The activeTask is either a remove task, or a downloading task that we just canceled. In
         // the latter case we need to wait for the task to stop before we start a remove task.
         return;
       }
@@ -965,9 +1073,8 @@ public final class DownloadManager {
 
     // Task event processing.
 
-    private void onContentLengthChanged(Task task) {
+    private void onContentLengthChanged(Task task, long contentLength) {
       String downloadId = task.request.id;
-      long contentLength = task.contentLength;
       Download download =
           Assertions.checkNotNull(getDownload(downloadId, /* loadFromIndex= */ false));
       if (contentLength == download.contentLength || contentLength == C.LENGTH_UNSET) {
@@ -999,9 +1106,9 @@ public final class DownloadManager {
         return;
       }
 
-      Throwable finalError = task.finalError;
-      if (finalError != null) {
-        Log.e(TAG, "Task failed: " + task.request + ", " + isRemove, finalError);
+      @Nullable Exception finalException = task.finalException;
+      if (finalException != null) {
+        Log.e(TAG, "Task failed: " + task.request + ", " + isRemove, finalException);
       }
 
       Download download =
@@ -1009,7 +1116,7 @@ public final class DownloadManager {
       switch (download.state) {
         case STATE_DOWNLOADING:
           Assertions.checkState(!isRemove);
-          onDownloadTaskStopped(download, finalError);
+          onDownloadTaskStopped(download, finalException);
           break;
         case STATE_REMOVING:
         case STATE_RESTARTING:
@@ -1027,16 +1134,16 @@ public final class DownloadManager {
       syncTasks();
     }
 
-    private void onDownloadTaskStopped(Download download, @Nullable Throwable finalError) {
+    private void onDownloadTaskStopped(Download download, @Nullable Exception finalException) {
       download =
           new Download(
               download.request,
-              finalError == null ? STATE_COMPLETED : STATE_FAILED,
+              finalException == null ? STATE_COMPLETED : STATE_FAILED,
               download.startTimeMs,
               /* updateTimeMs= */ System.currentTimeMillis(),
               download.contentLength,
               download.stopReason,
-              finalError == null ? FAILURE_REASON_NONE : FAILURE_REASON_UNKNOWN,
+              finalException == null ? FAILURE_REASON_NONE : FAILURE_REASON_UNKNOWN,
               download.progress);
       // The download is now in a terminal state, so should not be in the downloads list.
       downloads.remove(getDownloadIndex(download.request.id));
@@ -1047,7 +1154,8 @@ public final class DownloadManager {
         Log.e(TAG, "Failed to update index.", e);
       }
       DownloadUpdate update =
-          new DownloadUpdate(download, /* isRemove= */ false, new ArrayList<>(downloads));
+          new DownloadUpdate(
+              download, /* isRemove= */ false, new ArrayList<>(downloads), finalException);
       mainHandler.obtainMessage(MSG_DOWNLOAD_UPDATE, update).sendToTarget();
     }
 
@@ -1065,7 +1173,11 @@ public final class DownloadManager {
           Log.e(TAG, "Failed to remove from database");
         }
         DownloadUpdate update =
-            new DownloadUpdate(download, /* isRemove= */ true, new ArrayList<>(downloads));
+            new DownloadUpdate(
+                download,
+                /* isRemove= */ true,
+                new ArrayList<>(downloads),
+                /* finalException= */ null);
         mainHandler.obtainMessage(MSG_DOWNLOAD_UPDATE, update).sendToTarget();
       }
     }
@@ -1120,7 +1232,11 @@ public final class DownloadManager {
         Log.e(TAG, "Failed to update index.", e);
       }
       DownloadUpdate update =
-          new DownloadUpdate(download, /* isRemove= */ false, new ArrayList<>(downloads));
+          new DownloadUpdate(
+              download,
+              /* isRemove= */ false,
+              new ArrayList<>(downloads),
+              /* finalException= */ null);
       mainHandler.obtainMessage(MSG_DOWNLOAD_UPDATE, update).sendToTarget();
       return download;
     }
@@ -1176,9 +1292,9 @@ public final class DownloadManager {
     private final boolean isRemove;
     private final int minRetryCount;
 
-    private volatile InternalHandler internalHandler;
+    @Nullable private volatile InternalHandler internalHandler;
     private volatile boolean isCanceled;
-    @Nullable private Throwable finalError;
+    @Nullable private Exception finalException;
 
     private long contentLength;
 
@@ -1243,10 +1359,12 @@ public final class DownloadManager {
             }
           }
         }
-      } catch (Throwable e) {
-        finalError = e;
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      } catch (Exception e) {
+        finalException = e;
       }
-      Handler internalHandler = this.internalHandler;
+      @Nullable Handler internalHandler = this.internalHandler;
       if (internalHandler != null) {
         internalHandler.obtainMessage(MSG_TASK_STOPPED, this).sendToTarget();
       }
@@ -1258,15 +1376,21 @@ public final class DownloadManager {
       downloadProgress.percentDownloaded = percentDownloaded;
       if (contentLength != this.contentLength) {
         this.contentLength = contentLength;
-        Handler internalHandler = this.internalHandler;
+        @Nullable Handler internalHandler = this.internalHandler;
         if (internalHandler != null) {
-          internalHandler.obtainMessage(MSG_CONTENT_LENGTH_CHANGED, this).sendToTarget();
+          internalHandler
+              .obtainMessage(
+                  MSG_CONTENT_LENGTH_CHANGED,
+                  (int) (contentLength >> 32),
+                  (int) contentLength,
+                  this)
+              .sendToTarget();
         }
       }
     }
 
     private static int getRetryDelayMillis(int errorCount) {
-      return Math.min((errorCount - 1) * 1000, 5000);
+      return min((errorCount - 1) * 1000, 5000);
     }
   }
 
@@ -1275,11 +1399,17 @@ public final class DownloadManager {
     public final Download download;
     public final boolean isRemove;
     public final List<Download> downloads;
+    @Nullable public final Exception finalException;
 
-    public DownloadUpdate(Download download, boolean isRemove, List<Download> downloads) {
+    public DownloadUpdate(
+        Download download,
+        boolean isRemove,
+        List<Download> downloads,
+        @Nullable Exception finalException) {
       this.download = download;
       this.isRemove = isRemove;
       this.downloads = downloads;
+      this.finalException = finalException;
     }
   }
 }

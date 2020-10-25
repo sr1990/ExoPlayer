@@ -15,6 +15,7 @@
  */
 package com.google.android.exoplayer2.upstream;
 
+import static com.google.android.exoplayer2.util.Assertions.checkNotNull;
 import static com.google.android.exoplayer2.util.Util.castNonNull;
 
 import androidx.annotation.Nullable;
@@ -33,7 +34,7 @@ public abstract class BaseDataSource implements DataSource {
   private final ArrayList<TransferListener> listeners;
 
   private int listenerCount;
-  private @Nullable DataSpec dataSpec;
+  @Nullable private DataSpec dataSpec;
 
   /**
    * Creates base data source.
@@ -47,6 +48,7 @@ public abstract class BaseDataSource implements DataSource {
 
   @Override
   public final void addTransferListener(TransferListener transferListener) {
+    checkNotNull(transferListener);
     if (!listeners.contains(transferListener)) {
       listeners.add(transferListener);
       listenerCount++;

@@ -35,27 +35,27 @@ import org.junit.runner.RunWith;
 public final class TtmlRenderUtilTest {
 
   @Test
-  public void testResolveStyleNoStyleAtAll() {
+  public void resolveStyleNoStyleAtAll() {
     assertThat(resolveStyle(null, null, null)).isNull();
   }
 
   @Test
-  public void testResolveStyleSingleReferentialStyle() {
+  public void resolveStyleSingleReferentialStyle() {
     Map<String, TtmlStyle> globalStyles = getGlobalStyles();
     String[] styleIds = {"s0"};
 
     assertThat(TtmlRenderUtil.resolveStyle(null, styleIds, globalStyles))
-        .isSameAs(globalStyles.get("s0"));
+        .isSameInstanceAs(globalStyles.get("s0"));
   }
 
   @Test
-  public void testResolveStyleMultipleReferentialStyles() {
+  public void resolveStyleMultipleReferentialStyles() {
     Map<String, TtmlStyle> globalStyles = getGlobalStyles();
     String[] styleIds = {"s0", "s1"};
 
     TtmlStyle resolved = TtmlRenderUtil.resolveStyle(null, styleIds, globalStyles);
-    assertThat(resolved).isNotSameAs(globalStyles.get("s0"));
-    assertThat(resolved).isNotSameAs(globalStyles.get("s1"));
+    assertThat(resolved).isNotSameInstanceAs(globalStyles.get("s0"));
+    assertThat(resolved).isNotSameInstanceAs(globalStyles.get("s1"));
     assertThat(resolved.getId()).isNull();
 
     // inherited from s0
@@ -67,14 +67,14 @@ public final class TtmlRenderUtilTest {
   }
 
   @Test
-  public void testResolveMergeSingleReferentialStyleIntoInlineStyle() {
+  public void resolveMergeSingleReferentialStyleIntoInlineStyle() {
     Map<String, TtmlStyle> globalStyles = getGlobalStyles();
     String[] styleIds = {"s0"};
     TtmlStyle style = new TtmlStyle();
     style.setBackgroundColor(Color.YELLOW);
 
     TtmlStyle resolved = TtmlRenderUtil.resolveStyle(style, styleIds, globalStyles);
-    assertThat(resolved).isSameAs(style);
+    assertThat(resolved).isSameInstanceAs(style);
 
     // inline attribute not overridden
     assertThat(resolved.getBackgroundColor()).isEqualTo(YELLOW);
@@ -83,14 +83,14 @@ public final class TtmlRenderUtilTest {
   }
 
   @Test
-  public void testResolveMergeMultipleReferentialStylesIntoInlineStyle() {
+  public void resolveMergeMultipleReferentialStylesIntoInlineStyle() {
     Map<String, TtmlStyle> globalStyles = getGlobalStyles();
     String[] styleIds = {"s0", "s1"};
     TtmlStyle style = new TtmlStyle();
     style.setBackgroundColor(Color.YELLOW);
 
     TtmlStyle resolved = TtmlRenderUtil.resolveStyle(style, styleIds, globalStyles);
-    assertThat(resolved).isSameAs(style);
+    assertThat(resolved).isSameInstanceAs(style);
 
     // inline attribute not overridden
     assertThat(resolved.getBackgroundColor()).isEqualTo(YELLOW);
@@ -99,9 +99,9 @@ public final class TtmlRenderUtilTest {
   }
 
   @Test
-  public void testResolveStyleOnlyInlineStyle() {
+  public void resolveStyleOnlyInlineStyle() {
     TtmlStyle inlineStyle = new TtmlStyle();
-    assertThat(TtmlRenderUtil.resolveStyle(inlineStyle, null, null)).isSameAs(inlineStyle);
+    assertThat(TtmlRenderUtil.resolveStyle(inlineStyle, null, null)).isSameInstanceAs(inlineStyle);
   }
 
   private static Map<String, TtmlStyle> getGlobalStyles() {

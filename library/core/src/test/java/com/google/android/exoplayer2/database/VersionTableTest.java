@@ -38,7 +38,7 @@ public class VersionTableTest {
 
   @Before
   public void setUp() {
-    databaseProvider = TestUtil.getTestDatabaseProvider();
+    databaseProvider = TestUtil.getInMemoryDatabaseProvider();
     database = databaseProvider.getWritableDatabase();
   }
 
@@ -84,17 +84,5 @@ public class VersionTableTest {
     assertThat(VersionTable.getVersion(database, FEATURE_1, INSTANCE_1))
         .isEqualTo(VersionTable.VERSION_UNSET);
     assertThat(VersionTable.getVersion(database, FEATURE_1, INSTANCE_2)).isEqualTo(2);
-  }
-
-  @Test
-  public void doesTableExist_nonExistingTable_returnsFalse() {
-    assertThat(VersionTable.tableExists(database, "NonExistingTable")).isFalse();
-  }
-
-  @Test
-  public void doesTableExist_existingTable_returnsTrue() {
-    String table = "TestTable";
-    databaseProvider.getWritableDatabase().execSQL("CREATE TABLE " + table + " (dummy INTEGER)");
-    assertThat(VersionTable.tableExists(database, table)).isTrue();
   }
 }

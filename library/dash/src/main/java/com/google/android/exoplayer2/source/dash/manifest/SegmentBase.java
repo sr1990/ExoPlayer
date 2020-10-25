@@ -15,6 +15,9 @@
  */
 package com.google.android.exoplayer2.source.dash.manifest;
 
+import static java.lang.Math.min;
+
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.source.dash.DashSegmentIndex;
 import com.google.android.exoplayer2.util.Util;
@@ -25,7 +28,7 @@ import java.util.List;
  */
 public abstract class SegmentBase {
 
-  /* package */ final RangedUri initialization;
+  @Nullable /* package */ final RangedUri initialization;
   /* package */ final long timescale;
   /* package */ final long presentationTimeOffset;
 
@@ -36,7 +39,8 @@ public abstract class SegmentBase {
    * @param presentationTimeOffset The presentation time offset. The value in seconds is the
    *     division of this value and {@code timescale}.
    */
-  public SegmentBase(RangedUri initialization, long timescale, long presentationTimeOffset) {
+  public SegmentBase(
+      @Nullable RangedUri initialization, long timescale, long presentationTimeOffset) {
     this.initialization = initialization;
     this.timescale = timescale;
     this.presentationTimeOffset = presentationTimeOffset;
@@ -49,6 +53,7 @@ public abstract class SegmentBase {
    * @param representation The {@link Representation} for which initialization data is required.
    * @return A {@link RangedUri} defining the location of the initialization data, or null.
    */
+  @Nullable
   public RangedUri getInitialization(Representation representation) {
     return initialization;
   }
@@ -77,19 +82,31 @@ public abstract class SegmentBase {
      * @param indexStart The byte offset of the index data in the segment.
      * @param indexLength The length of the index data in bytes.
      */
-    public SingleSegmentBase(RangedUri initialization, long timescale, long presentationTimeOffset,
-        long indexStart, long indexLength) {
+    public SingleSegmentBase(
+        @Nullable RangedUri initialization,
+        long timescale,
+        long presentationTimeOffset,
+        long indexStart,
+        long indexLength) {
       super(initialization, timescale, presentationTimeOffset);
       this.indexStart = indexStart;
       this.indexLength = indexLength;
     }
 
     public SingleSegmentBase() {
-      this(null, 1, 0, 0, 0);
+      this(
+          /* initialization= */ null,
+          /* timescale= */ 1,
+          /* presentationTimeOffset= */ 0,
+          /* indexStart= */ 0,
+          /* indexLength= */ 0);
     }
 
+    @Nullable
     public RangedUri getIndex() {
-      return indexLength <= 0 ? null : new RangedUri(null, indexStart, indexLength);
+      return indexLength <= 0
+          ? null
+          : new RangedUri(/* referenceUri= */ null, indexStart, indexLength);
     }
 
   }
@@ -101,7 +118,7 @@ public abstract class SegmentBase {
 
     /* package */ final long startNumber;
     /* package */ final long duration;
-    /* package */ final List<SegmentTimelineElement> segmentTimeline;
+    @Nullable /* package */ final List<SegmentTimelineElement> segmentTimeline;
 
     /**
      * @param initialization A {@link RangedUri} corresponding to initialization data, if such data
@@ -118,12 +135,12 @@ public abstract class SegmentBase {
      *     parameter.
      */
     public MultiSegmentBase(
-        RangedUri initialization,
+        @Nullable RangedUri initialization,
         long timescale,
         long presentationTimeOffset,
         long startNumber,
         long duration,
-        List<SegmentTimelineElement> segmentTimeline) {
+        @Nullable List<SegmentTimelineElement> segmentTimeline) {
       super(initialization, timescale, presentationTimeOffset);
       this.startNumber = startNumber;
       this.duration = duration;
@@ -142,9 +159,11 @@ public abstract class SegmentBase {
         long durationUs = (duration * C.MICROS_PER_SECOND) / timescale;
         long segmentNum = startNumber + timeUs / durationUs;
         // Ensure we stay within bounds.
-        return segmentNum < firstSegmentNum ? firstSegmentNum
-            : segmentCount == DashSegmentIndex.INDEX_UNBOUNDED ? segmentNum
-            : Math.min(segmentNum, firstSegmentNum + segmentCount - 1);
+        return segmentNum < firstSegmentNum
+            ? firstSegmentNum
+            : segmentCount == DashSegmentIndex.INDEX_UNBOUNDED
+                ? segmentNum
+                : min(segmentNum, firstSegmentNum + segmentCount - 1);
       } else {
         // The index cannot be unbounded. Identify the segment using binary search.
         long lowIndex = firstSegmentNum;
@@ -218,12 +237,10 @@ public abstract class SegmentBase {
 
   }
 
-  /**
-   * A {@link MultiSegmentBase} that uses a SegmentList to define its segments.
-   */
-  public static class SegmentList extends MultiSegmentBase {
+  /** A {@link MultiSegmentBase} that uses a SegmentList to define its segments. */
+  public static final class SegmentList extends MultiSegmentBase {
 
-    /* package */ final List<RangedUri> mediaSegments;
+    @Nullable /* package */ final List<RangedUri> mediaSegments;
 
     /**
      * @param initialization A {@link RangedUri} corresponding to initialization data, if such data
@@ -246,8 +263,8 @@ public abstract class SegmentBase {
         long presentationTimeOffset,
         long startNumber,
         long duration,
-        List<SegmentTimelineElement> segmentTimeline,
-        List<RangedUri> mediaSegments) {
+        @Nullable List<SegmentTimelineElement> segmentTimeline,
+        @Nullable List<RangedUri> mediaSegments) {
       super(initialization, timescale, presentationTimeOffset, startNumber, duration,
           segmentTimeline);
       this.mediaSegments = mediaSegments;
@@ -270,13 +287,11 @@ public abstract class SegmentBase {
 
   }
 
-  /**
-   * A {@link MultiSegmentBase} that uses a SegmentTemplate to define its segments.
-   */
-  public static class SegmentTemplate extends MultiSegmentBase {
+  /** A {@link MultiSegmentBase} that uses a SegmentTemplate to define its segments. */
+  public static final class SegmentTemplate extends MultiSegmentBase {
 
-    /* package */ final UrlTemplate initializationTemplate;
-    /* package */ final UrlTemplate mediaTemplate;
+    @Nullable /* package */ final UrlTemplate initializationTemplate;
+    @Nullable /* package */ final UrlTemplate mediaTemplate;
     /* package */ final long endNumber;
 
     /**
@@ -308,9 +323,9 @@ public abstract class SegmentBase {
         long startNumber,
         long endNumber,
         long duration,
-        List<SegmentTimelineElement> segmentTimeline,
-        UrlTemplate initializationTemplate,
-        UrlTemplate mediaTemplate) {
+        @Nullable List<SegmentTimelineElement> segmentTimeline,
+        @Nullable UrlTemplate initializationTemplate,
+        @Nullable UrlTemplate mediaTemplate) {
       super(
           initialization,
           timescale,
@@ -324,6 +339,7 @@ public abstract class SegmentBase {
     }
 
     @Override
+    @Nullable
     public RangedUri getInitialization(Representation representation) {
       if (initializationTemplate != null) {
         String urlString = initializationTemplate.buildUri(representation.format.id, 0,
@@ -362,10 +378,8 @@ public abstract class SegmentBase {
     }
   }
 
-  /**
-   * Represents a timeline segment from the MPD's SegmentTimeline list.
-   */
-  public static class SegmentTimelineElement {
+  /** Represents a timeline segment from the MPD's SegmentTimeline list. */
+  public static final class SegmentTimelineElement {
 
     /* package */ final long startTime;
     /* package */ final long duration;
@@ -381,6 +395,22 @@ public abstract class SegmentBase {
       this.duration = duration;
     }
 
+    @Override
+    public boolean equals(@Nullable Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      SegmentTimelineElement that = (SegmentTimelineElement) o;
+      return startTime == that.startTime && duration == that.duration;
+    }
+
+    @Override
+    public int hashCode() {
+      return 31 * (int) startTime + (int) duration;
+    }
   }
 
 }

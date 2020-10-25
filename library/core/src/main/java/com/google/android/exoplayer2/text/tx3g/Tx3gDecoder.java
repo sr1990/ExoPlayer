@@ -15,6 +15,9 @@
  */
 package com.google.android.exoplayer2.text.tx3g;
 
+import static com.google.android.exoplayer2.text.Cue.ANCHOR_TYPE_START;
+import static com.google.android.exoplayer2.text.Cue.LINE_TYPE_FRACTION;
+
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.text.SpannableStringBuilder;
@@ -30,7 +33,7 @@ import com.google.android.exoplayer2.text.Subtitle;
 import com.google.android.exoplayer2.text.SubtitleDecoderException;
 import com.google.android.exoplayer2.util.ParsableByteArray;
 import com.google.android.exoplayer2.util.Util;
-import java.nio.charset.Charset;
+import com.google.common.base.Charsets;
 import java.util.List;
 
 /**
@@ -43,8 +46,8 @@ public final class Tx3gDecoder extends SimpleSubtitleDecoder {
   private static final char BOM_UTF16_BE = '\uFEFF';
   private static final char BOM_UTF16_LE = '\uFFFE';
 
-  private static final int TYPE_STYL = Util.getIntegerCodeForString("styl");
-  private static final int TYPE_TBOX = Util.getIntegerCodeForString("tbox");
+  private static final int TYPE_STYL = 0x7374796c;
+  private static final int TYPE_TBOX = 0x74626f78;
   private static final String TX3G_SERIF = "Serif";
 
   private static final int SIZE_ATOM_HEADER = 8;
@@ -150,15 +153,11 @@ public final class Tx3gDecoder extends SimpleSubtitleDecoder {
       parsableByteArray.setPosition(position + atomSize);
     }
     return new Tx3gSubtitle(
-        new Cue(
-            cueText,
-            /* textAlignment= */ null,
-            verticalPlacement,
-            Cue.LINE_TYPE_FRACTION,
-            Cue.ANCHOR_TYPE_START,
-            Cue.DIMEN_UNSET,
-            Cue.TYPE_UNSET,
-            Cue.DIMEN_UNSET));
+        new Cue.Builder()
+            .setText(cueText)
+            .setLine(verticalPlacement, LINE_TYPE_FRACTION)
+            .setLineAnchor(ANCHOR_TYPE_START)
+            .build());
   }
 
   private static String readSubtitleText(ParsableByteArray parsableByteArray)
@@ -171,10 +170,10 @@ public final class Tx3gDecoder extends SimpleSubtitleDecoder {
     if (parsableByteArray.bytesLeft() >= SIZE_BOM_UTF16) {
       char firstChar = parsableByteArray.peekChar();
       if (firstChar == BOM_UTF16_BE || firstChar == BOM_UTF16_LE) {
-        return parsableByteArray.readString(textLength, Charset.forName(C.UTF16_NAME));
+        return parsableByteArray.readString(textLength, Charsets.UTF_16);
       }
     }
-    return parsableByteArray.readString(textLength, Charset.forName(C.UTF8_NAME));
+    return parsableByteArray.readString(textLength, Charsets.UTF_8);
   }
 
   private void applyStyleRecord(ParsableByteArray parsableByteArray,

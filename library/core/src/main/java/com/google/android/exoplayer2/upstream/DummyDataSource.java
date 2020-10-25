@@ -19,9 +19,7 @@ import android.net.Uri;
 import androidx.annotation.Nullable;
 import java.io.IOException;
 
-/**
- * A dummy DataSource which provides no data. {@link #open(DataSpec)} throws {@link IOException}.
- */
+/** A DataSource which provides no data. {@link #open(DataSpec)} throws {@link IOException}. */
 public final class DummyDataSource implements DataSource {
 
   public static final DummyDataSource INSTANCE = new DummyDataSource();
@@ -38,21 +36,22 @@ public final class DummyDataSource implements DataSource {
 
   @Override
   public long open(DataSpec dataSpec) throws IOException {
-    throw new IOException("Dummy source");
+    throw new IOException("DummyDataSource cannot be opened");
   }
 
   @Override
-  public int read(byte[] buffer, int offset, int readLength) throws IOException {
+  public int read(byte[] buffer, int offset, int readLength) {
     throw new UnsupportedOperationException();
   }
 
   @Override
-  public @Nullable Uri getUri() {
+  @Nullable
+  public Uri getUri() {
     return null;
   }
 
   @Override
-  public void close() throws IOException {
+  public void close() {
     // do nothing.
   }
 }

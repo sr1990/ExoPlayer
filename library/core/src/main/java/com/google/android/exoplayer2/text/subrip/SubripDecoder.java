@@ -15,12 +15,14 @@
  */
 package com.google.android.exoplayer2.text.subrip;
 
-import androidx.annotation.Nullable;
 import android.text.Html;
 import android.text.Spanned;
 import android.text.TextUtils;
+import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.text.Cue;
 import com.google.android.exoplayer2.text.SimpleSubtitleDecoder;
+import com.google.android.exoplayer2.text.Subtitle;
+import com.google.android.exoplayer2.util.Assertions;
 import com.google.android.exoplayer2.util.Log;
 import com.google.android.exoplayer2.util.LongArray;
 import com.google.android.exoplayer2.util.ParsableByteArray;
@@ -34,16 +36,18 @@ import java.util.regex.Pattern;
 public final class SubripDecoder extends SimpleSubtitleDecoder {
 
   // Fractional positions for use when alignment tags are present.
-  /* package */ static final float START_FRACTION = 0.08f;
-  /* package */ static final float END_FRACTION = 1 - START_FRACTION;
-  /* package */ static final float MID_FRACTION = 0.5f;
+  private static final float START_FRACTION = 0.08f;
+  private static final float END_FRACTION = 1 - START_FRACTION;
+  private static final float MID_FRACTION = 0.5f;
 
   private static final String TAG = "SubripDecoder";
 
-  private static final String SUBRIP_TIMECODE = "(?:(\\d+):)?(\\d+):(\\d+),(\\d+)";
+  // Some SRT files don't include hours or milliseconds in the timecode, so we use optional groups.
+  private static final String SUBRIP_TIMECODE = "(?:(\\d+):)?(\\d+):(\\d+)(?:,(\\d+))?";
   private static final Pattern SUBRIP_TIMING_LINE =
-      Pattern.compile("\\s*(" + SUBRIP_TIMECODE + ")\\s*-->\\s*(" + SUBRIP_TIMECODE + ")?\\s*");
+      Pattern.compile("\\s*(" + SUBRIP_TIMECODE + ")\\s*-->\\s*(" + SUBRIP_TIMECODE + ")\\s*");
 
+  // NOTE: Android Studio's suggestion to simplify '\\}' is incorrect [internal: b/144480183].
   private static final Pattern SUBRIP_TAG_PATTERN = Pattern.compile("\\{\\\\.*?\\}");
   private static final String SUBRIP_ALIGNMENT_TAG = "\\{\\\\an[1-9]\\}";
 
@@ -68,19 +72,19 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
   }
 
   @Override
-  protected SubripSubtitle decode(byte[] bytes, int length, boolean reset) {
+  protected Subtitle decode(byte[] bytes, int length, boolean reset) {
     ArrayList<Cue> cues = new ArrayList<>();
     LongArray cueTimesUs = new LongArray();
     ParsableByteArray subripData = new ParsableByteArray(bytes, length);
-    String currentLine;
 
+    @Nullable String currentLine;
     while ((currentLine = subripData.readLine()) != null) {
       if (currentLine.length() == 0) {
         // Skip blank lines.
         continue;
       }
 
-      // Parse the index line as a sanity check.
+      // Parse and check the index line.
       try {
         Integer.parseInt(currentLine);
       } catch (NumberFormatException e) {
@@ -89,7 +93,6 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
       }
 
       // Read and parse the timing line.
-      boolean haveEndTimecode = false;
       currentLine = subripData.readLine();
       if (currentLine == null) {
         Log.w(TAG, "Unexpected end");
@@ -98,11 +101,8 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
 
       Matcher matcher = SUBRIP_TIMING_LINE.matcher(currentLine);
       if (matcher.matches()) {
-        cueTimesUs.add(parseTimecode(matcher, 1));
-        if (!TextUtils.isEmpty(matcher.group(6))) {
-          haveEndTimecode = true;
-          cueTimesUs.add(parseTimecode(matcher, 6));
-        }
+        cueTimesUs.add(parseTimecode(matcher, /* groupOffset= */ 1));
+        cueTimesUs.add(parseTimecode(matcher, /* groupOffset= */ 6));
       } else {
         Log.w(TAG, "Skipping invalid timing: " + currentLine);
         continue;
@@ -122,7 +122,7 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
 
       Spanned text = Html.fromHtml(textBuilder.toString());
 
-      String alignmentTag = null;
+      @Nullable String alignmentTag = null;
       for (int i = 0; i < tags.size(); i++) {
         String tag = tags.get(i);
         if (tag.matches(SUBRIP_ALIGNMENT_TAG)) {
@@ -132,14 +132,10 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
         }
       }
       cues.add(buildCue(text, alignmentTag));
-
-      if (haveEndTimecode) {
-        cues.add(Cue.EMPTY);
-      }
+      cues.add(Cue.EMPTY);
     }
 
-    Cue[] cuesArray = new Cue[cues.size()];
-    cues.toArray(cuesArray);
+    Cue[] cuesArray = cues.toArray(new Cue[0]);
     long[] cueTimesUsArray = cueTimesUs.toArray();
     return new SubripSubtitle(cuesArray, cueTimesUsArray);
   }
@@ -177,68 +173,66 @@ public final class SubripDecoder extends SimpleSubtitleDecoder {
    * @return Built cue
    */
   private Cue buildCue(Spanned text, @Nullable String alignmentTag) {
+    Cue.Builder cue = new Cue.Builder().setText(text);
     if (alignmentTag == null) {
-      return new Cue(text);
+      return cue.build();
     }
 
     // Horizontal alignment.
-    @Cue.AnchorType int positionAnchor;
     switch (alignmentTag) {
       case ALIGN_BOTTOM_LEFT:
       case ALIGN_MID_LEFT:
       case ALIGN_TOP_LEFT:
-        positionAnchor = Cue.ANCHOR_TYPE_START;
+        cue.setPositionAnchor(Cue.ANCHOR_TYPE_START);
         break;
       case ALIGN_BOTTOM_RIGHT:
       case ALIGN_MID_RIGHT:
       case ALIGN_TOP_RIGHT:
-        positionAnchor = Cue.ANCHOR_TYPE_END;
+        cue.setPositionAnchor(Cue.ANCHOR_TYPE_END);
         break;
       case ALIGN_BOTTOM_MID:
       case ALIGN_MID_MID:
       case ALIGN_TOP_MID:
       default:
-        positionAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+        cue.setPositionAnchor(Cue.ANCHOR_TYPE_MIDDLE);
         break;
     }
 
     // Vertical alignment.
-    @Cue.AnchorType int lineAnchor;
     switch (alignmentTag) {
       case ALIGN_BOTTOM_LEFT:
       case ALIGN_BOTTOM_MID:
       case ALIGN_BOTTOM_RIGHT:
-        lineAnchor = Cue.ANCHOR_TYPE_END;
+        cue.setLineAnchor(Cue.ANCHOR_TYPE_END);
         break;
       case ALIGN_TOP_LEFT:
       case ALIGN_TOP_MID:
       case ALIGN_TOP_RIGHT:
-        lineAnchor = Cue.ANCHOR_TYPE_START;
+        cue.setLineAnchor(Cue.ANCHOR_TYPE_START);
         break;
       case ALIGN_MID_LEFT:
       case ALIGN_MID_MID:
       case ALIGN_MID_RIGHT:
       default:
-        lineAnchor = Cue.ANCHOR_TYPE_MIDDLE;
+        cue.setLineAnchor(Cue.ANCHOR_TYPE_MIDDLE);
         break;
     }
 
-    return new Cue(
-        text,
-        /* textAlignment= */ null,
-        getFractionalPositionForAnchorType(lineAnchor),
-        Cue.LINE_TYPE_FRACTION,
-        lineAnchor,
-        getFractionalPositionForAnchorType(positionAnchor),
-        positionAnchor,
-        Cue.DIMEN_UNSET);
+    return cue.setPosition(getFractionalPositionForAnchorType(cue.getPositionAnchor()))
+        .setLine(getFractionalPositionForAnchorType(cue.getLineAnchor()), Cue.LINE_TYPE_FRACTION)
+        .build();
   }
 
   private static long parseTimecode(Matcher matcher, int groupOffset) {
-    long timestampMs = Long.parseLong(matcher.group(groupOffset + 1)) * 60 * 60 * 1000;
-    timestampMs += Long.parseLong(matcher.group(groupOffset + 2)) * 60 * 1000;
-    timestampMs += Long.parseLong(matcher.group(groupOffset + 3)) * 1000;
-    timestampMs += Long.parseLong(matcher.group(groupOffset + 4));
+    @Nullable String hours = matcher.group(groupOffset + 1);
+    long timestampMs = hours != null ? Long.parseLong(hours) * 60 * 60 * 1000 : 0;
+    timestampMs +=
+        Long.parseLong(Assertions.checkNotNull(matcher.group(groupOffset + 2))) * 60 * 1000;
+    timestampMs += Long.parseLong(Assertions.checkNotNull(matcher.group(groupOffset + 3))) * 1000;
+    @Nullable String millis = matcher.group(groupOffset + 4);
+    if (millis != null) {
+      timestampMs += Long.parseLong(millis);
+    }
     return timestampMs * 1000;
   }
 

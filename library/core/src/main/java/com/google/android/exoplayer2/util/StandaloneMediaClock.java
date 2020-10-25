@@ -38,7 +38,7 @@ public final class StandaloneMediaClock implements MediaClock {
    */
   public StandaloneMediaClock(Clock clock) {
     this.clock = clock;
-    this.playbackParameters = PlaybackParameters.DEFAULT;
+    playbackParameters = PlaybackParameters.DEFAULT;
   }
 
   /**
@@ -81,6 +81,8 @@ public final class StandaloneMediaClock implements MediaClock {
       if (playbackParameters.speed == 1f) {
         positionUs += C.msToUs(elapsedSinceBaseMs);
       } else {
+        // Add the media time in microseconds that will elapse in elapsedSinceBaseMs milliseconds of
+        // wallclock time
         positionUs += playbackParameters.getMediaTimeUsForPlayoutTimeMs(elapsedSinceBaseMs);
       }
     }
@@ -88,13 +90,12 @@ public final class StandaloneMediaClock implements MediaClock {
   }
 
   @Override
-  public PlaybackParameters setPlaybackParameters(PlaybackParameters playbackParameters) {
+  public void setPlaybackParameters(PlaybackParameters playbackParameters) {
     // Store the current position as the new base, in case the playback speed has changed.
     if (started) {
       resetPosition(getPositionUs());
     }
     this.playbackParameters = playbackParameters;
-    return playbackParameters;
   }
 
   @Override
