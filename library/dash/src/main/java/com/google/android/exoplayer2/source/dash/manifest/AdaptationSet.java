@@ -15,8 +15,11 @@
  */
 package com.google.android.exoplayer2.source.dash.manifest;
 
+import android.media.audiofx.AudioEffect;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Represents a set of interchangeable encoded versions of a media content component.
@@ -53,6 +56,9 @@ public class AdaptationSet {
   /** Essential properties in the adaptation set. */
   public final List<Descriptor> essentialProperties;
 
+  public final List<Descriptor> SBDProperties = null;
+  public static boolean hasSBDProperties = false;
+
   /** Supplemental properties in the adaptation set. */
   public final List<Descriptor> supplementalProperties;
 
@@ -79,5 +85,34 @@ public class AdaptationSet {
     this.accessibilityDescriptors = Collections.unmodifiableList(accessibilityDescriptors);
     this.essentialProperties = Collections.unmodifiableList(essentialProperties);
     this.supplementalProperties = Collections.unmodifiableList(supplementalProperties);
+  }
+  public AdaptationSet(
+      int id,
+      int type,
+      List<Representation> representations,
+      List<Descriptor> accessibilityDescriptors,
+      List<Descriptor> essentialProperties,
+      List<Descriptor> supplementalProperties,
+      List<SBDDescriptor> sbdDescriptors) {
+    this.id = id;
+    this.type = type;
+    this.representations = Collections.unmodifiableList(representations);
+    this.accessibilityDescriptors = Collections.unmodifiableList(accessibilityDescriptors);
+    this.essentialProperties = Collections.unmodifiableList(essentialProperties);
+    this.supplementalProperties = Collections.unmodifiableList(supplementalProperties);
+
+    if (sbdDescriptors != null) {
+      sbdDescriptors = Collections.unmodifiableList(sbdDescriptors);
+      hasSBDProperties = true;
+    }
+
+  }
+
+  // Create a table of Map<SegmentIndex, Array of query values>
+  // Create a data member to store Map<SegmentIndex, QueryString>
+  // Populate the above data member here.
+  public Map<Integer,String> createSBDTable() {
+    Map< Integer, String> m = new HashMap<Integer, String>();
+    return m;
   }
 }

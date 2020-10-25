@@ -17,11 +17,13 @@ package com.google.android.exoplayer2.source.dash.manifest;
 
 import static java.lang.Math.min;
 
+import android.util.Log;
 import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.source.dash.DashSegmentIndex;
 import com.google.android.exoplayer2.util.Util;
 import java.util.List;
+import java.util.Map;
 
 /**
  * An approximate representation of a SegmentBase manifest element.
@@ -360,6 +362,43 @@ public abstract class SegmentBase {
       }
       String uriString = mediaTemplate.buildUri(representation.format.id, sequenceNumber,
           representation.format.bitrate, time);
+
+      //Access sbd client here. if initialized, get the query and append to uriString
+      String query = "";
+
+      if (!representation.sbdDescriptorArrayList.isEmpty() && SBDClient.isInitilaized()) {
+        for (SBDDescriptor sbdDescriptor: representation.sbdDescriptorArrayList) {
+          /*String sbd_template = "";
+          if (sbdDescriptor.template != null) {
+            sbd_template = sbdDescriptor.template;
+          }*/
+
+          for(Map.Entry<String,String> keyValuePair : sbdDescriptor.keyValuePairs.entrySet()) {
+              String Value = SBDClient.getInstance().
+                  getValueFromSBDTable(representation.getAdaptationSetid(), sequenceNumber, keyValuePair.getKey());
+              Log.d("SBD","KEY: "+keyValuePair.getKey()+"  VALUE: "+Value);
+
+               //TODO query as per template
+              //if (sbd_template != "") {
+                //When value at key@Template is found in the SBD document, it's corresponding
+                //key-value pair of SBD document shall replace the string between
+                //$$
+               // if (sbd_template.contains(keyValuePair.getKey()))
+               //    sbd_template.replace("$"+ keyValuePair.getKey()+"$",Value);
+              //} else {
+                if (query == "") {
+                  query += "?" + keyValuePair.getKey() + "=" + Value;
+                } else {
+                  query += "&" + keyValuePair.getKey() + "=" + Value;
+                }
+              //}
+
+          }
+        }
+      }
+
+      uriString = uriString + query;
+
       return new RangedUri(uriString, 0, C.LENGTH_UNSET);
     }
 

@@ -29,6 +29,11 @@ dependencies {
     compileOnly 'org.checkerframework:checker-compat-qual:' + checkerframeworkCompatVersion
     compileOnly 'org.jetbrains.kotlin:kotlin-annotations-jvm:' + kotlinAnnotationsVersion
     implementation 'androidx.annotation:annotation:' + androidxAnnotationVersion
+    implementation("com.google.guava:guava:30.0-android")
+    implementation 'com.android.volley:volley:1.1.1'
+    implementation 'com.google.code.gson:gson:2.8.6'
+    implementation 'org.apache.commons:commons-lang3:3.11'
+    implementation 'org.apache.commons:commons-text:1.6'
     testImplementation project(modulePrefix + 'robolectricutils')
     testImplementation project(modulePrefix + 'testutils')
     testImplementation 'org.robolectric:robolectric:' + robolectricVersion

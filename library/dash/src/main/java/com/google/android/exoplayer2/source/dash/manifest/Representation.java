@@ -22,8 +22,10 @@ import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.source.dash.DashSegmentIndex;
 import com.google.android.exoplayer2.source.dash.manifest.SegmentBase.MultiSegmentBase;
 import com.google.android.exoplayer2.source.dash.manifest.SegmentBase.SingleSegmentBase;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import org.checkerframework.checker.units.qual.A;
 
 /**
  * A DASH representation.
@@ -58,6 +60,25 @@ public abstract class Representation {
   public final List<Descriptor> inbandEventStreams;
 
   private final RangedUri initializationUri;
+
+ 
+  public int adaptationSetid = -1;
+
+  public ArrayList<SBDDescriptor> sbdDescriptorArrayList;
+
+  public void setSbdDescriptorArrayList(ArrayList<SBDDescriptor> descriptorArrayList1) {
+    sbdDescriptorArrayList = descriptorArrayList1;
+  }
+  public ArrayList<SBDDescriptor> getSbdDescriptorArrayList() {
+    return sbdDescriptorArrayList;
+  }
+
+  public void setAdaptationSetid(int setadaptationSetid) {
+    adaptationSetid = setadaptationSetid;
+  }
+  public int getAdaptationSetid(){
+    return adaptationSetid;
+  }
 
   /**
    * Constructs a new instance.
@@ -145,6 +166,7 @@ public abstract class Representation {
             : Collections.unmodifiableList(inbandEventStreams);
     initializationUri = segmentBase.getInitialization(this);
     presentationTimeOffsetUs = segmentBase.getPresentationTimeOffsetUs();
+    sbdDescriptorArrayList = new ArrayList<>();
   }
 
   /**

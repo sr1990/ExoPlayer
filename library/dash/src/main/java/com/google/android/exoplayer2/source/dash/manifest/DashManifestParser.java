@@ -45,7 +45,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -303,6 +305,7 @@ public class DashManifestParser extends DefaultHandler
     ArrayList<Descriptor> essentialProperties = new ArrayList<>();
     ArrayList<Descriptor> supplementalProperties = new ArrayList<>();
     List<RepresentationInfo> representationInfos = new ArrayList<>();
+    ArrayList<SBDDescriptor> sbdDescriptors = new ArrayList<>();
 
     boolean seenFirstBaseUrl = false;
     do {
@@ -330,7 +333,17 @@ public class DashManifestParser extends DefaultHandler
       } else if (XmlPullParserUtil.isStartTag(xpp, "Accessibility")) {
         accessibilityDescriptors.add(parseDescriptor(xpp, "Accessibility"));
       } else if (XmlPullParserUtil.isStartTag(xpp, "EssentialProperty")) {
-        essentialProperties.add(parseDescriptor(xpp, "EssentialProperty"));
+
+        if (parseString(xpp, "schemeIdUri", "").equals("urn:mpeg:dash:sbd:2020")) {
+          Log.d("SBD","Adding SBD descriptor.");
+          sbdDescriptors.add(parseSBDDescriptor(xpp, "EssentialProperty"));
+          for (SBDDescriptor sbdProperty: sbdDescriptors) {
+            Log.d("SBD", "URI: "+sbdProperty.schemeIdUri+
+                " Value: " + sbdProperty.value);
+          }
+        } else {
+        essentialProperties.add(parseDescriptor(xpp, "EssentialProperty"));}
+
       } else if (XmlPullParserUtil.isStartTag(xpp, "SupplementalProperty")) {
         supplementalProperties.add(parseDescriptor(xpp, "SupplementalProperty"));
       } else if (XmlPullParserUtil.isStartTag(xpp, "Representation")) {
@@ -350,6 +363,7 @@ public class DashManifestParser extends DefaultHandler
                 accessibilityDescriptors,
                 essentialProperties,
                 supplementalProperties,
+                sbdDescriptors,
                 segmentBase,
                 periodDurationMs);
         contentType =
@@ -383,8 +397,19 @@ public class DashManifestParser extends DefaultHandler
               drmSchemeType,
               drmSchemeDatas,
               inbandEventStreams));
+      Log.d("SBD","sbd descriptors size: "+sbdDescriptors.size());
     }
+    Log.d("SBD", "Number of reps: "+representations.size());
+    if (!sbdDescriptors.isEmpty()) {
+      Log.d("SBD", "SBD descriptors are not empty");
+      for (Representation rep: representations) {
+        rep.setAdaptationSetid(id);
+        Log.d("SBD", "Setting sbd table for rep"+rep.format.id);
+        rep.setSbdDescriptorArrayList(sbdDescriptors);
+      }
 
+      SBDClient.getInstance().setSBDTableRep(id, sbdDescriptors);
+    }
     return buildAdaptationSet(
         id,
         contentType,
@@ -523,6 +548,7 @@ public class DashManifestParser extends DefaultHandler
       List<Descriptor> adaptationSetAccessibilityDescriptors,
       List<Descriptor> adaptationSetEssentialProperties,
       List<Descriptor> adaptationSetSupplementalProperties,
+      List<SBDDescriptor> sbdDescriptors,
       @Nullable SegmentBase segmentBase,
       long periodDurationMs)
       throws XmlPullParserException, IOException {
@@ -1432,6 +1458,34 @@ public class DashManifestParser extends DefaultHandler
       xpp.next();
     } while (!XmlPullParserUtil.isEndTag(xpp, tag));
     return new Descriptor(schemeIdUri, value, id);
+  }
+  /**
+   * Parses a {@link SBDDescriptor} from an element.
+   *
+   * @param xpp The parser from which to read.
+   * @param tag The tag of the element being parsed.
+   * @throws XmlPullParserException If an error occurs parsing the element.
+   * @throws IOException If an error occurs reading the element.
+   * @return The parsed {@link Descriptor}.
+   */
+  protected static SBDDescriptor parseSBDDescriptor(XmlPullParser xpp, String tag)
+      throws XmlPullParserException, IOException {
+    String schemeIdUri = parseString(xpp, "schemeIdUri", "");
+    String value = parseString(xpp, "value", null);
+    String id = parseString(xpp, "id", null);
+    String sbdTemplate = parseString(xpp, "sbd:template",null);
+    Map<String,String> keyValuePairs = new HashMap<String,String>();
+
+    do {
+      xpp.next();
+      if ("sbd:Key".equalsIgnoreCase(xpp.getName())) {
+        String key = parseString(xpp,"name", "");
+        String defaultValue = parseString(xpp,"defaultValue", "");
+        keyValuePairs.put(key, defaultValue);
+        xpp.next();
+      }
+    } while (!XmlPullParserUtil.isEndTag(xpp, tag));
+    return new SBDDescriptor(schemeIdUri, value, id, sbdTemplate, keyValuePairs);
   }
 
   protected static int parseCea608AccessibilityChannel(

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--Generated with https://github.com/google/shaka-packager version 2909ca0c77-debug-->
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="urn:mpeg:dash:schema:mpd:2011 DASH-MPD.xsd" xmlns:sbd="urn:mpeg:dash:sbd:2020" profiles="urn:mpeg:dash:profile:isoff-live:2011" minBufferTime="PT2S" type="static" mediaPresentationDuration="PT52.20833206176758S">
+  <Period id="0">
+    <AdaptationSet id="0" contentType="video" maxWidth="1280" maxHeight="720" maxFrameRate="96/4" segmentAlignment="true" par="16:9">
+      <EssentialProperty schemeIdUri="urn:mpeg:dash:sbd:2020" value="http://10.0.0.220:3001/" sbd:template="t1">
+        <sbd:Key name="key1" defaultValue="v1"/>
+        <sbd:Key name="key2" defaultValue="v2"/>
+      </EssentialProperty>
+      <EssentialProperty schemeIdUri="urn:mpeg:dash:sbd:2020" value="http://10.0.0.220:3002/" sbd:template="t2">
+        <sbd:Key name="key3" defaultValue="v3"/>
+        <sbd:Key name="key4" defaultValue="v4"/>
+      </EssentialProperty>
+      <Representation id="0" bandwidth="2942370" codecs="avc1.4d401f" mimeType="video/mp4" sar="1:1" width="1280" height="720" frameRate="96/4">
+        <SegmentTemplate timescale="96" initialization="h264_1280p/init.mp4" media="h264_1280p/$Number$.m4s" startNumber="1">
+          <SegmentTimeline>
+            <S t="0" d="576" r="7"/>
+            <S t="4608" d="404"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+      <Representation id="1" bandwidth="212490" codecs="avc1.4d401f" mimeType="video/mp4" sar="1:1" width="1024" height="576" frameRate="96/192">
+        <SegmentTemplate timescale="96" initialization="h264_1024p/init.mp4" media="h264_1024p/$Number$.m4s" startNumber="1">
+          <SegmentTimeline>
+            <S t="0" d="576" r="7"/>
+            <S t="4608" d="404"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>
