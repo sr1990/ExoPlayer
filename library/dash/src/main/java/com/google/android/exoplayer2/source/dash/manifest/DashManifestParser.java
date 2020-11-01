@@ -408,7 +408,7 @@ public class DashManifestParser extends DefaultHandler
         rep.setSbdDescriptorArrayList(sbdDescriptors);
       }
 
-      SBDClient.getInstance().setSBDTableRep(id, sbdDescriptors);
+      SBDClient.getInstance().setSBDTable(id, sbdDescriptors);
     }
     return buildAdaptationSet(
         id,

@@ -15,7 +15,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 class SbdOrderlineTable {
-      public static Map<Long, Map<String, String>> table;
+      public Map<Long, Map<String, String>> table;
 
   public SbdOrderlineTable() {
     table = Collections.synchronizedMap(new HashMap<>());
@@ -61,89 +61,12 @@ class SbdOrderlineTable {
   }
 
   public void populateTable(Integer r , ArrayList<SBDDescriptor> sbdDescriptorList) {
-   /* Map<String, String> keyValue1 = new HashMap<>();
-    keyValue1.put("k1","r1");
-    keyValue1.put("k2","r1");
-    keyValue1.put("k3","r1");
-    keyValue1.put("k4","r1");
-    table.put(new Long(1), keyValue1);
-
-    Map<String, String> keyValue2 = new HashMap<>();
-    keyValue2.put("k1","r2");
-    keyValue2.put("k2","r2");
-    keyValue2.put("k3","r2");
-    keyValue2.put("k4","r2");
-    table.put(new Long(2), keyValue2);
-
-    Map<String, String> keyValue3 = new HashMap<>();
-    keyValue3.put("k1","r3");
-    keyValue3.put("k2","r3");
-    keyValue3.put("k3","r3");
-    keyValue3.put("k4","r3");
-    table.put(new Long(3), keyValue3);
-
-    Map<String, String> keyValue4 = new HashMap<>();
-    keyValue4.put("k1","r4");
-    keyValue4.put("k2","r4");
-    keyValue4.put("k3","r4");
-    keyValue4.put("k4","r4");
-    table.put(new Long(4), keyValue4);
-
-    Map<String, String> keyValue5 = new HashMap<>();
-    keyValue5.put("k1","r5");
-    keyValue5.put("k2","r5");
-    keyValue5.put("k3","r5");
-    keyValue5.put("k4","r5");
-    table.put(new Long(5), keyValue5);
-
-    Map<String, String> keyValue6 = new HashMap<>();
-    keyValue6.put("k1","r6");
-    keyValue6.put("k2","r6");
-    keyValue6.put("k3","r6");
-    keyValue6.put("k4","r6");
-    table.put(new Long(6), keyValue6);
-
-    Map<String, String> keyValue7 = new HashMap<>();
-    keyValue7.put("k1","r7");
-    keyValue7.put("k2","r7");
-    keyValue7.put("k3","r7");
-    keyValue7.put("k4","r7");
-    table.put(new Long(7), keyValue7);
-
-    Map<String, String> keyValue8 = new HashMap<>();
-    keyValue8.put("k1","r8");
-    keyValue8.put("k2","r8");
-    keyValue8.put("k3","r8");
-    keyValue8.put("k4","r8");
-    table.put(new Long(8), keyValue8);
-
-    Map<String, String> keyValue9 = new HashMap<>();
-    keyValue9.put("k1","r9");
-    keyValue9.put("k2","r9");
-    keyValue9.put("k3","r9");
-    keyValue9.put("k4","r9");
-    table.put(new Long(9), keyValue9);
-
-    Map<String, String> keyValue10 = new HashMap<>();
-    keyValue10.put("k1","r10");
-    keyValue10.put("k2","r10");
-    keyValue10.put("k3","r10");
-    keyValue10.put("k4","r10");
-    table.put(new Long(10), keyValue10);
-
-    Map<String, String> keyValue11 = new HashMap<>();
-    keyValue11.put("k1","r11");
-    keyValue11.put("k2","r11");
-    keyValue11.put("k3","r11");
-    keyValue11.put("k4","r11");
-    table.put(new Long(11), keyValue11);
-*/
 
     ExecutorService executor = Executors.newFixedThreadPool(5);
 
     for (SBDDescriptor sbdDescriptor: sbdDescriptorList) {
       Log.d("SBD","SBD file url: "+sbdDescriptor.value);
-      Runnable worker = new MyRunnable(sbdDescriptor.value);
+      Runnable worker = new TableDownloader(sbdDescriptor.value, table);
       executor.execute(worker);
     }
     executor.shutdown();
@@ -169,12 +92,15 @@ class SbdOrderlineTable {
   }
  */
 
-  public static class MyRunnable implements Runnable {
+  public static class TableDownloader implements Runnable {
 
     private final String url;
     private Gson gson;
 
-    MyRunnable(String url) {
+    public Map<Long, Map<String, String>> table;
+
+    TableDownloader(String url, Map<Long, Map<String, String>> table) {
+      this.table = table;
       this.url = url;
       gson = new Gson();
     }

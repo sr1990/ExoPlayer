@@ -1,6 +1,5 @@
 package com.google.android.exoplayer2.source.dash.manifest;
 
-import com.google.android.exoplayer2.util.Log;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -8,37 +7,37 @@ import java.util.Map;
 public class SBDClient {
   // static variable single_instance of type Singleton
   private static SBDClient single_instance = null;
-
-  public Map<Integer, SbdOrderlineTable> SBDRepTableOrderline;
+ // AdaptationSet : SbdOrderlineTable (SegmentNUmber: map of key value pairs)
+  public Map<Integer, SbdOrderlineTable> SBDTableOrderline;
 
   //CONSTRUCTOR
   // private constructor restricted to this class itself
   private SBDClient()
   {
-    SBDRepTableOrderline = new HashMap<>();
+    SBDTableOrderline = new HashMap<>();
   }
 
   //SETTERS
-  //Create a sbdOrderline table with representation id.
-  public void setSBDTableRep(Integer r , ArrayList<SBDDescriptor> sbdDescriptorList) {
-    if (SBDRepTableOrderline.isEmpty() ||
-        (!SBDRepTableOrderline.isEmpty() && !SBDRepTableOrderline.containsKey(r))) {
+  //Create a sbdOrderline table with adaptation set id.
+  public void setSBDTable(Integer adaptationSetId , ArrayList<SBDDescriptor> sbdDescriptorList) {
+    if (SBDTableOrderline.isEmpty() ||
+        (!SBDTableOrderline.isEmpty() && !SBDTableOrderline.containsKey(adaptationSetId))) {
       SbdOrderlineTable sbdOrderlineTable = new SbdOrderlineTable();
-      sbdOrderlineTable.populateTable(r, sbdDescriptorList);
-      SBDRepTableOrderline.put(r, sbdOrderlineTable);
+      sbdOrderlineTable.populateTable(adaptationSetId, sbdDescriptorList);
+      SBDTableOrderline.put(adaptationSetId, sbdOrderlineTable);
     }
   }
 
   //GETTERS
   String getValueFromSBDTable(Integer AdaptationSetId, long SequenceNumber, String key) {
-    SbdOrderlineTable tempTable = SBDRepTableOrderline.get(AdaptationSetId);
+    SbdOrderlineTable tempTable = SBDTableOrderline.get(AdaptationSetId);
     String res =  tempTable.getKeysQuery(SequenceNumber, key);
     return res;
   }
 
   //SbdOrderlineTable getter as per representation id.
   SbdOrderlineTable getSBDTableRep(Integer i) {
-      return SBDRepTableOrderline.get(i);
+      return SBDTableOrderline.get(i);
   }
 
   //SBDClient related
