@@ -73,7 +73,6 @@ class SbdOrderlineTable {
     // Wait until all threads are finish
     while (!executor.isTerminated()) {}
     Log.d("SBD","All threads done and table populated.");
-
   }
 
   /*

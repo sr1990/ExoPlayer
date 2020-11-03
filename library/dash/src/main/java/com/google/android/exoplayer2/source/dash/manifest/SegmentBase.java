@@ -365,39 +365,52 @@ public abstract class SegmentBase {
 
       //Access sbd client here. if initialized, get the query and append to uriString
       String query = "";
-
+      String sbd_template = "";
       if (!representation.sbdDescriptorArrayList.isEmpty() && SBDClient.isInitilaized()) {
         for (SBDDescriptor sbdDescriptor: representation.sbdDescriptorArrayList) {
-          /*String sbd_template = "";
+
           if (sbdDescriptor.template != null) {
             sbd_template = sbdDescriptor.template;
-          }*/
+          }
 
           for(Map.Entry<String,String> keyValuePair : sbdDescriptor.keyValuePairs.entrySet()) {
               String Value = SBDClient.getInstance().
-                  getValueFromSBDTable(representation.getAdaptationSetid(), sequenceNumber, keyValuePair.getKey());
+                  getValueFromSBDTable(representation.getAdaptationSetid(),
+                                      sequenceNumber, keyValuePair.getKey());
               Log.d("SBD","KEY: "+keyValuePair.getKey()+"  VALUE: "+Value);
 
-               //TODO query as per template
-              //if (sbd_template != "") {
+              //Set to default value of kye if Value not found
+              if (Value.isEmpty())
+                 Value = keyValuePair.getValue();
+
+               //TODO query as per sbd template
+               //if sbd_template is not null -> replace sbd_template with the values
+              if (sbd_template != "") {
                 //When value at key@Template is found in the SBD document, it's corresponding
                 //key-value pair of SBD document shall replace the string between
                 //$$
-               // if (sbd_template.contains(keyValuePair.getKey()))
-               //    sbd_template.replace("$"+ keyValuePair.getKey()+"$",Value);
-              //} else {
+                if (sbd_template.contains(keyValuePair.getKey())) {
+                  String replaceKey = "$" + keyValuePair.getKey() + "$";
+                  sbd_template = sbd_template.replace(replaceKey, Value);
+                }
+              } else {
                 if (query == "") {
                   query += "?" + keyValuePair.getKey() + "=" + Value;
                 } else {
                   query += "&" + keyValuePair.getKey() + "=" + Value;
                 }
-              //}
+              }
 
           }
         }
       }
+      //if sdbtemplate is present uriString = uriString + "?" + sbd_template;
 
-      uriString = uriString + query;
+      if (sbd_template != "")
+        uriString = uriString + "?" +sbd_template;
+
+      if ( query != "")
+        uriString = uriString + query;
 
       return new RangedUri(uriString, 0, C.LENGTH_UNSET);
     }
