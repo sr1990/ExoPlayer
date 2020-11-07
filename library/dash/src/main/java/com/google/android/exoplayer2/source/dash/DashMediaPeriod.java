@@ -47,6 +47,7 @@ import com.google.android.exoplayer2.source.dash.manifest.Descriptor;
 import com.google.android.exoplayer2.source.dash.manifest.EventStream;
 import com.google.android.exoplayer2.source.dash.manifest.Period;
 import com.google.android.exoplayer2.source.dash.manifest.Representation;
+import com.google.android.exoplayer2.source.dash.manifest.SBDClient;
 import com.google.android.exoplayer2.trackselection.TrackSelection;
 import com.google.android.exoplayer2.upstream.Allocator;
 import com.google.android.exoplayer2.upstream.LoadErrorHandlingPolicy;
@@ -281,6 +282,18 @@ import org.checkerframework.checker.nullness.compatqual.NullableType;
     }
     sampleStreams = newSampleStreamArray(sampleStreamList.size());
     sampleStreamList.toArray(sampleStreams);
+    //TODO:
+    for (ChunkSampleStream<DashChunkSource> sampleStream : sampleStreamList) {
+      DefaultDashChunkSource tempDefaultDashChunkSource=
+          (DefaultDashChunkSource) sampleStream.getChunkSource();
+      DefaultDashChunkSource.RepresentationHolder[] repholders =
+          tempDefaultDashChunkSource.getRepresentationHolders();
+      for (DefaultDashChunkSource.RepresentationHolder repholder : repholders) {
+        if (!repholder.representation.sbdDescriptorArrayList.isEmpty())
+          SBDClient.getInstance().setSBDTable(repholder.representation.getAdaptationSetid(),
+              repholder.representation.sbdDescriptorArrayList);
+      }
+    }
     eventSampleStreams = new EventSampleStream[eventSampleStreamList.size()];
     eventSampleStreamList.toArray(eventSampleStreams);
 

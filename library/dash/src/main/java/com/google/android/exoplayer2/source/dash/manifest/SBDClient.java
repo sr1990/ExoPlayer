@@ -35,11 +35,6 @@ public class SBDClient {
     return res;
   }
 
-  //SbdOrderlineTable getter as per representation id.
-  SbdOrderlineTable getSBDTableRep(Integer i) {
-      return SBDTableOrderline.get(i);
-  }
-
   //SBDClient related
   //check if SBDClient is initialized or not.
   public static boolean isInitilaized() {

@@ -463,6 +463,11 @@ public class DefaultDashChunkSource implements DashChunkSource {
     }
   }
 
+  //get representationHolders
+  RepresentationHolder[] getRepresentationHolders() {
+    return representationHolders;
+  }
+
   // Internal methods.
 
   private long getSegmentNum(
@@ -671,6 +676,9 @@ public class DefaultDashChunkSource implements DashChunkSource {
       this.segmentIndex = segmentIndex;
     }
 
+    Representation getRepresentation() {
+      return representation;
+    }
     @CheckResult
     /* package */ RepresentationHolder copyWithNewRepresentation(
         long newPeriodDurationUs, Representation newRepresentation)

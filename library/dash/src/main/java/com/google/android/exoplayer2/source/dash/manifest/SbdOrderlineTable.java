@@ -26,38 +26,14 @@ class SbdOrderlineTable {
     return table;
   }
 
-  //Method to return all maps.
-  public Map<String, String> getKeys(Long sequenceNumber) {
-    return table.get(sequenceNumber);
-  }
-
   //Method to get values of multiple keys. Get only a few keys from the table.
   public String getKeysQuery(Long sequenceNumber, String key) {
     Map<String,String> res = new HashMap<String,String>();
     Map<String,String> tempRes = table.get(sequenceNumber);
-      if (tempRes.containsKey(key)){
+      if (tempRes != null && !tempRes.isEmpty() && tempRes.containsKey(key)){
          return tempRes.get(key);
       }
       return "";
-  }
-
-  //getQuery: Go through all the key-values and create a string query.
-  //Template not taken into consideration yet.
-
-  public String getStringQuery(Long sequenceNumber) {
-    String res = new String();
-    Map<String,String> tempRes = table.get(sequenceNumber);
-    for (Map.Entry<String,String> s: tempRes.entrySet()) {
-      res += "?" + s.getKey() + "=" + s.getValue();
-    }
-    Log.d("SBD","Returning query: "+res);
-    return res;
-  }
-
-  Map<String,String> setKey(String key, String value) {
-    Map<String, String> e1 = new HashMap<String,String>();
-    e1.put(key,value);
-    return e1;
   }
 
   public void populateTable(Integer r , ArrayList<SBDDescriptor> sbdDescriptorList) {

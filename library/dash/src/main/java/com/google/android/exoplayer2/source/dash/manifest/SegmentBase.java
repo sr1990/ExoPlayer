@@ -380,8 +380,13 @@ public abstract class SegmentBase {
               Log.d("SBD","KEY: "+keyValuePair.getKey()+"  VALUE: "+Value);
 
               //Set to default value of kye if Value not found
-              if (Value.isEmpty())
-                 Value = keyValuePair.getValue();
+              if (Value.isEmpty()) {
+                if (!keyValuePair.getValue().isEmpty()) {
+                  Value = keyValuePair.getValue();
+                } else {
+                  Value = "nil";
+                }
+              }
 
                //TODO query as per sbd template
                //if sbd_template is not null -> replace sbd_template with the values

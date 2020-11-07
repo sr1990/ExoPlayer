@@ -9,7 +9,17 @@
       },
       {
         "name": "SBD",
+        "uri": "http://10.0.0.58:3000/h264_sbd.mpd",
+        "extension": "mpd"
+      },
+      {
+        "name": "SBDSANIL",
         "uri": "http://10.0.0.220:3000/h264_sbd.mpd",
+        "extension": "mpd"
+      },
+      {
+        "name": "SBDSANILNEW",
+        "uri": "http://10.0.0.220:3000/h264_sbd_with_template.mpd",
         "extension": "mpd"
       },
       {

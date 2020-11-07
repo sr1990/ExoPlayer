@@ -408,7 +408,9 @@ public class DashManifestParser extends DefaultHandler
         rep.setSbdDescriptorArrayList(sbdDescriptors);
       }
 
-      SBDClient.getInstance().setSBDTable(id, sbdDescriptors);
+      // For creating SBDTable only for selected adaptation sets
+      // Add below to DashMediaPeriod:286 selectTracks
+      //SBDClient.getInstance().setSBDTable(id, sbdDescriptors);
     }
     return buildAdaptationSet(
         id,
